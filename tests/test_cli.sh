@@ -418,6 +418,99 @@ test_hook_install_idempotent() {
   assert_contains "$output" "already installed" "idempotent message"
 }
 
+# ─── mcp tests ────────────────────────────────────────────────────────────────
+
+test_mcp_install() {
+  export HOME="$TMPDIR_BASE"
+  "$AI_INST" mcp install 2>&1
+  assert_file_exists "$TMPDIR_BASE/.claude/settings.json" "settings created"
+  local content
+  content="$(cat "$TMPDIR_BASE/.claude/settings.json")"
+  assert_contains "$content" '"ai-inst"' "has ai-inst key"
+  assert_contains "$content" '"npx"' "has npx command"
+  assert_contains "$content" '"tsx"' "has tsx arg"
+  assert_contains "$content" 'mcp-server/src/index.ts' "has mcp-server path"
+}
+
+test_mcp_install_idempotent() {
+  export HOME="$TMPDIR_BASE"
+  "$AI_INST" mcp install 2>&1
+  local output
+  output="$("$AI_INST" mcp install 2>&1)"
+  assert_contains "$output" "already configured" "idempotent message"
+  # verify file is still valid JSON
+  node -e "JSON.parse(require('fs').readFileSync('$TMPDIR_BASE/.claude/settings.json','utf-8'))" 2>&1
+}
+
+test_mcp_install_into_existing_settings() {
+  export HOME="$TMPDIR_BASE"
+  mkdir -p "$TMPDIR_BASE/.claude"
+  echo '{"someKey": "someValue"}' > "$TMPDIR_BASE/.claude/settings.json"
+  "$AI_INST" mcp install 2>&1
+  local content
+  content="$(cat "$TMPDIR_BASE/.claude/settings.json")"
+  assert_contains "$content" '"someKey"' "preserves existing key"
+  assert_contains "$content" '"ai-inst"' "has ai-inst"
+}
+
+test_mcp_install_into_existing_mcp_servers() {
+  export HOME="$TMPDIR_BASE"
+  mkdir -p "$TMPDIR_BASE/.claude"
+  echo '{"mcpServers": {"other": {"command": "test"}}}' > "$TMPDIR_BASE/.claude/settings.json"
+  "$AI_INST" mcp install 2>&1
+  local content
+  content="$(cat "$TMPDIR_BASE/.claude/settings.json")"
+  assert_contains "$content" '"other"' "preserves other server"
+  assert_contains "$content" '"ai-inst"' "has ai-inst"
+}
+
+test_mcp_install_project() {
+  export HOME="$TMPDIR_BASE"
+  cd "$PROJECT_DIR"
+  "$AI_INST" mcp install --project 2>&1
+  assert_file_exists "$PROJECT_DIR/.claude/settings.json" "project settings created"
+  local content
+  content="$(cat "$PROJECT_DIR/.claude/settings.json")"
+  assert_contains "$content" '"ai-inst"' "has ai-inst key"
+  # user-level should NOT be created
+  assert_file_not_exists "$TMPDIR_BASE/.claude/settings.json" "user settings not created"
+}
+
+test_mcp_remove() {
+  export HOME="$TMPDIR_BASE"
+  "$AI_INST" mcp install 2>&1
+  "$AI_INST" mcp remove 2>&1
+  local content
+  content="$(cat "$TMPDIR_BASE/.claude/settings.json")"
+  assert_not_contains "$content" '"ai-inst"' "ai-inst removed"
+  # file should still be valid JSON
+  node -e "JSON.parse(require('fs').readFileSync('$TMPDIR_BASE/.claude/settings.json','utf-8'))" 2>&1
+}
+
+test_mcp_remove_not_installed() {
+  export HOME="$TMPDIR_BASE"
+  mkdir -p "$TMPDIR_BASE/.claude"
+  echo '{"mcpServers": {}}' > "$TMPDIR_BASE/.claude/settings.json"
+  local output
+  output="$("$AI_INST" mcp remove 2>&1)"
+  assert_contains "$output" "not found" "not found message"
+}
+
+test_mcp_status_not_installed() {
+  export HOME="$TMPDIR_BASE"
+  local output
+  output="$("$AI_INST" mcp status 2>&1)"
+  assert_contains "$output" "not installed" "shows not installed"
+}
+
+test_mcp_status_installed() {
+  export HOME="$TMPDIR_BASE"
+  "$AI_INST" mcp install 2>&1
+  local output
+  output="$("$AI_INST" mcp status 2>&1)"
+  assert_contains "$output" "installed" "shows installed"
+}
+
 # ─── edge case tests ─────────────────────────────────────────────────────────
 
 test_no_repo_error() {
@@ -487,6 +580,18 @@ echo "hooks:"
 run_test test_hook_install
 run_test test_hook_remove
 run_test test_hook_install_idempotent
+
+echo ""
+echo "mcp:"
+run_test test_mcp_install
+run_test test_mcp_install_idempotent
+run_test test_mcp_install_into_existing_settings
+run_test test_mcp_install_into_existing_mcp_servers
+run_test test_mcp_install_project
+run_test test_mcp_remove
+run_test test_mcp_remove_not_installed
+run_test test_mcp_status_not_installed
+run_test test_mcp_status_installed
 
 echo ""
 echo "edge cases:"
