@@ -1,0 +1,19 @@
+{
+  "name": "ai-inst-mcp-server",
+  "version": "0.1.0",
+  "description": "MCP server for ai-inst — modular AI instruction manager",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.3",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}
