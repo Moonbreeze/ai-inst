@@ -557,13 +557,17 @@ cmd_hook() {
 # ─── MCP ───────────────────────────────────────────────────────────────────
 
 cmd_mcp_install() {
-  local scope="user"
+  local scope="project" target="claude"
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --project) scope="project"; shift ;;
-      *) die "Unknown option: $1" ;;
+      --global) scope="global"; shift ;;
+      --claude) target="claude"; shift ;;
+      --codex) target="codex"; shift ;;
+      *) die "Unknown option: $1. Usage: ai-inst mcp install [--claude|--codex] [--global]" ;;
     esac
   done
+
+  [[ "$target" == "claude" || "$target" == "codex" ]] || die "Unsupported target: $target. Use --claude or --codex."
 
   # Determine MCP server path
   local script_path
@@ -575,18 +579,26 @@ cmd_mcp_install() {
   [[ -d "$mcp_dir" ]] || die "MCP server directory not found at $mcp_dir"
   [[ -f "$mcp_dir/src/index.ts" ]] || die "MCP server source not found"
 
-  local settings_file
-  if [[ "$scope" == "project" ]]; then
-    settings_file=".claude/settings.json"
-    mkdir -p .claude
-  else
-    settings_file="$HOME/.claude/settings.json"
-    mkdir -p "$HOME/.claude"
-  fi
+  if [[ "$target" == "claude" ]]; then
+    if [[ "$scope" == "global" ]]; then
+      command -v claude &>/dev/null || die "'claude' CLI not found — required for --global"
+      local output
+      if output="$(claude mcp add -s user ai-inst -- npx tsx "$mcp_dir/src/index.ts" 2>&1)"; then
+        info "MCP server added globally (claude mcp, scope: user)"
+      else
+        if echo "$output" | grep -qi "already"; then
+          info "MCP server 'ai-inst' already configured globally"
+        else
+          die "Failed to add MCP server globally: $output"
+        fi
+      fi
+      return
+    fi
 
-  # Build the new server entry using simple JSON construction
-  local server_json
-  server_json=$(cat <<JSONEOF
+    local mcp_file=".mcp.json"
+
+    local server_json
+    server_json=$(cat <<JSONEOF
 {
   "command": "npx",
   "args": ["tsx", "$mcp_dir/src/index.ts"]
@@ -594,147 +606,216 @@ cmd_mcp_install() {
 JSONEOF
 )
 
-  if [[ -f "$settings_file" ]]; then
-    # Check if ai-inst MCP is already configured
-    if grep -q '"ai-inst"' "$settings_file" 2>/dev/null; then
-      info "MCP server 'ai-inst' already configured in $settings_file"
-      return
-    fi
-    # Insert into existing mcpServers or add mcpServers key
-    if grep -q '"mcpServers"' "$settings_file"; then
-      # Add ai-inst entry into existing mcpServers object
-      local tmpfile
-      tmpfile="$(mktemp)"
-      # Use node/python if available, else use sed
-      if command -v node &>/dev/null; then
-        node -e "
-          const fs = require('fs');
-          const settings = JSON.parse(fs.readFileSync('$settings_file', 'utf-8'));
-          settings.mcpServers = settings.mcpServers || {};
-          settings.mcpServers['ai-inst'] = $server_json;
-          fs.writeFileSync('$tmpfile', JSON.stringify(settings, null, 2) + '\n');
-        "
-      elif command -v python3 &>/dev/null; then
-        python3 -c "
-import json, sys
-with open('$settings_file') as f:
-    settings = json.load(f)
-settings.setdefault('mcpServers', {})['ai-inst'] = json.loads('''$server_json''')
-with open('$tmpfile', 'w') as f:
-    json.dump(settings, f, indent=2)
-    f.write('\n')
-"
-      else
-        die "node or python3 required to merge into existing settings"
+    if [[ -f "$mcp_file" ]]; then
+      if grep -q '"ai-inst"' "$mcp_file" 2>/dev/null; then
+        info "MCP server 'ai-inst' already configured in $mcp_file"
+        return
       fi
-      mv "$tmpfile" "$settings_file"
-    else
-      # No mcpServers key — add it
       local tmpfile
       tmpfile="$(mktemp)"
       if command -v node &>/dev/null; then
         node -e "
           const fs = require('fs');
-          const settings = JSON.parse(fs.readFileSync('$settings_file', 'utf-8'));
-          settings.mcpServers = { 'ai-inst': $server_json };
-          fs.writeFileSync('$tmpfile', JSON.stringify(settings, null, 2) + '\n');
+          const cfg = JSON.parse(fs.readFileSync('$mcp_file', 'utf-8'));
+          const servers = cfg.mcpServers || {};
+          servers['ai-inst'] = $server_json;
+          cfg.mcpServers = servers;
+          fs.writeFileSync('$tmpfile', JSON.stringify(cfg, null, 2) + '\n');
         "
       elif command -v python3 &>/dev/null; then
         python3 -c "
 import json
-with open('$settings_file') as f:
-    settings = json.load(f)
-settings['mcpServers'] = {'ai-inst': json.loads('''$server_json''')}
+with open('$mcp_file') as f:
+    cfg = json.load(f)
+cfg.setdefault('mcpServers', {})['ai-inst'] = json.loads('''$server_json''')
 with open('$tmpfile', 'w') as f:
-    json.dump(settings, f, indent=2)
+    json.dump(cfg, f, indent=2)
     f.write('\n')
 "
       else
-        die "node or python3 required to merge into existing settings"
+        die "node or python3 required to modify $mcp_file"
       fi
-      mv "$tmpfile" "$settings_file"
-    fi
-  else
-    # Create new settings file
-    cat > "$settings_file" << SEOF
+      mv "$tmpfile" "$mcp_file"
+    else
+      cat > "$mcp_file" << SEOF
 {
   "mcpServers": {
     "ai-inst": $server_json
   }
 }
 SEOF
+    fi
+
+    info "MCP server added to $mcp_file"
+    return
   fi
 
-  info "MCP server added to $settings_file"
-  if [[ "$scope" == "project" ]]; then
-    info "Scope: project (.claude/settings.json)"
+  # target == codex
+  local codex_config codex_scope_desc
+  if [[ "$scope" == "global" ]]; then
+    codex_config="$HOME/.codex/config.toml"
+    codex_scope_desc="global"
   else
-    info "Scope: user (~/.claude/settings.json)"
+    codex_config=".codex/config.toml"
+    codex_scope_desc="project"
   fi
+
+  local codex_dir
+  codex_dir="$(dirname "$codex_config")"
+  mkdir -p "$codex_dir"
+
+  if [[ -f "$codex_config" ]] && grep -q '^\[mcp_servers\.ai-inst\]' "$codex_config" 2>/dev/null; then
+    info "MCP server 'ai-inst' already configured in $codex_config"
+    return
+  fi
+
+  # ensure trailing newline
+  if [[ -f "$codex_config" ]] && [[ $(tail -c 1 "$codex_config" 2>/dev/null | wc -l) -eq 0 ]]; then
+    echo "" >> "$codex_config"
+  fi
+
+  cat >> "$codex_config" << TOML
+
+[mcp_servers.ai-inst]
+command = "npx"
+args = ["tsx", "$mcp_dir/src/index.ts"]
+TOML
+
+  info "MCP server added to $codex_config ($codex_scope_desc)"
 }
 
 cmd_mcp_remove() {
-  local scope="user"
+  local scope="project" target="claude"
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --project) scope="project"; shift ;;
-      *) die "Unknown option: $1" ;;
+      --global) scope="global"; shift ;;
+      --claude) target="claude"; shift ;;
+      --codex) target="codex"; shift ;;
+      *) die "Unknown option: $1. Usage: ai-inst mcp remove [--claude|--codex] [--global]" ;;
     esac
   done
 
-  local settings_file
-  if [[ "$scope" == "project" ]]; then
-    settings_file=".claude/settings.json"
-  else
-    settings_file="$HOME/.claude/settings.json"
+  [[ "$target" == "claude" || "$target" == "codex" ]] || die "Unsupported target: $target. Use --claude or --codex."
+
+  if [[ "$target" == "claude" ]]; then
+    if [[ "$scope" == "global" ]]; then
+      command -v claude &>/dev/null || die "'claude' CLI not found — required for --global"
+      local output
+      if output="$(claude mcp remove -s user ai-inst 2>&1)"; then
+        info "MCP server removed globally"
+      else
+        info "MCP server 'ai-inst' not found globally"
+      fi
+      return
+    fi
+
+    local mcp_file=".mcp.json"
+
+    [[ -f "$mcp_file" ]] || die "$mcp_file not found"
+
+    if ! grep -q '"ai-inst"' "$mcp_file" 2>/dev/null; then
+      info "MCP server 'ai-inst' not found in $mcp_file"
+      return
+    fi
+
+    local tmpfile
+    tmpfile="$(mktemp)"
+    if command -v node &>/dev/null; then
+      node -e "
+        const fs = require('fs');
+        const cfg = JSON.parse(fs.readFileSync('$mcp_file', 'utf-8'));
+        if (cfg.mcpServers) delete cfg.mcpServers['ai-inst'];
+        fs.writeFileSync('$tmpfile', JSON.stringify(cfg, null, 2) + '\n');
+      "
+    elif command -v python3 &>/dev/null; then
+      python3 -c "
+import json
+with open('$mcp_file') as f:
+    cfg = json.load(f)
+cfg.get('mcpServers', {}).pop('ai-inst', None)
+with open('$tmpfile', 'w') as f:
+    json.dump(cfg, f, indent=2)
+    f.write('\n')
+"
+    else
+      die "node or python3 required to modify $mcp_file"
+    fi
+    mv "$tmpfile" "$mcp_file"
+    info "MCP server removed from $mcp_file"
+    return
   fi
 
-  [[ -f "$settings_file" ]] || die "Settings file not found: $settings_file"
+  # target == codex
+  local codex_config
+  if [[ "$scope" == "global" ]]; then
+    codex_config="$HOME/.codex/config.toml"
+  else
+    codex_config=".codex/config.toml"
+  fi
 
-  if ! grep -q '"ai-inst"' "$settings_file" 2>/dev/null; then
-    info "MCP server 'ai-inst' not found in $settings_file"
+  [[ -f "$codex_config" ]] || die "$codex_config not found"
+
+  if ! grep -q '^\[mcp_servers\.ai-inst\]' "$codex_config" 2>/dev/null; then
+    info "MCP server 'ai-inst' not found in $codex_config"
     return
   fi
 
   local tmpfile
   tmpfile="$(mktemp)"
-  if command -v node &>/dev/null; then
-    node -e "
-      const fs = require('fs');
-      const settings = JSON.parse(fs.readFileSync('$settings_file', 'utf-8'));
-      if (settings.mcpServers) delete settings.mcpServers['ai-inst'];
-      fs.writeFileSync('$tmpfile', JSON.stringify(settings, null, 2) + '\n');
-    "
-  elif command -v python3 &>/dev/null; then
-    python3 -c "
-import json
-with open('$settings_file') as f:
-    settings = json.load(f)
-settings.get('mcpServers', {}).pop('ai-inst', None)
-with open('$tmpfile', 'w') as f:
-    json.dump(settings, f, indent=2)
-    f.write('\n')
-"
-  else
-    die "node or python3 required to modify settings"
-  fi
-  mv "$tmpfile" "$settings_file"
-  info "MCP server removed from $settings_file"
+  awk '
+    BEGIN {skip=0}
+    /^\[mcp_servers\.ai-inst\]/{skip=1; next}
+    skip && /^\[/{skip=0}
+    !skip {print}
+  ' "$codex_config" > "$tmpfile"
+  mv "$tmpfile" "$codex_config"
+  info "MCP server removed from $codex_config"
 }
 
 cmd_mcp_status() {
-  local settings_file="$HOME/.claude/settings.json"
-  local project_settings=".claude/settings.json"
+  local target="claude"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --claude) target="claude"; shift ;;
+      --codex) target="codex"; shift ;;
+      *) die "Unknown option: $1. Usage: ai-inst mcp status [--claude|--codex]" ;;
+    esac
+  done
 
-  echo "MCP server status:"
-  echo ""
-  if [[ -f "$settings_file" ]] && grep -q '"ai-inst"' "$settings_file" 2>/dev/null; then
-    echo "  User:    installed (~/.claude/settings.json)"
-  else
-    echo "  User:    not installed"
+  [[ "$target" == "claude" || "$target" == "codex" ]] || die "Unsupported target: $target. Use --claude or --codex."
+
+  if [[ "$target" == "claude" ]]; then
+    local mcp_file=".mcp.json"
+    local global_settings="$HOME/.claude/settings.local.json"
+
+    echo "MCP server status (Claude Code):"
+    echo ""
+    if [[ -f "$global_settings" ]] && grep -q '"ai-inst"' "$global_settings" 2>/dev/null; then
+      echo "  Global:  installed (~/.claude/settings.local.json)"
+    else
+      echo "  Global:  not installed"
+    fi
+    if [[ -f "$mcp_file" ]] && grep -q '"ai-inst"' "$mcp_file" 2>/dev/null; then
+      echo "  Project: installed ($mcp_file)"
+    else
+      echo "  Project: not installed"
+    fi
+    return
   fi
-  if [[ -f "$project_settings" ]] && grep -q '"ai-inst"' "$project_settings" 2>/dev/null; then
-    echo "  Project: installed (.claude/settings.json)"
+
+  # target == codex
+  local codex_global="$HOME/.codex/config.toml"
+  local codex_project=".codex/config.toml"
+
+  echo "MCP server status (Codex):"
+  echo ""
+  if [[ -f "$codex_global" ]] && grep -q '^\[mcp_servers\.ai-inst\]' "$codex_global" 2>/dev/null; then
+    echo "  Global:  installed ($codex_global)"
+  else
+    echo "  Global:  not installed"
+  fi
+  if [[ -f "$codex_project" ]] && grep -q '^\[mcp_servers\.ai-inst\]' "$codex_project" 2>/dev/null; then
+    echo "  Project: installed ($codex_project)"
   else
     echo "  Project: not installed"
   fi
@@ -747,7 +828,7 @@ cmd_mcp() {
     install) cmd_mcp_install "$@" ;;
     remove)  cmd_mcp_remove "$@" ;;
     status)  cmd_mcp_status "$@" ;;
-    *)       die "Usage: ai-inst mcp {install|remove|status} [--project]" ;;
+    *)       die "Usage: ai-inst mcp {install|remove|status} [--claude|--codex] [--global]" ;;
   esac
 }
 
@@ -789,9 +870,9 @@ Hooks:
   hook remove                     Remove hooks
 
 MCP:
-  mcp install [--project]         Add MCP server to Claude settings
-  mcp remove [--project]          Remove MCP server from Claude settings
-  mcp status                      Show MCP installation status
+  mcp install [--claude|--codex] [--global]  Add MCP server for Claude Code or Codex
+  mcp remove  [--claude|--codex] [--global]  Remove MCP server for Claude Code or Codex
+  mcp status  [--claude|--codex]              Show MCP installation status
 
 Environment:
   AI_INST_DIR    Path to rules repo (default: ~/.ai-instructions)

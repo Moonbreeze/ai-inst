@@ -18,6 +18,8 @@ setup() {
   export AI_INST_DIR="$TMPDIR_BASE/repo"
   PROJECT_DIR="$TMPDIR_BASE/project"
   mkdir -p "$PROJECT_DIR"
+  export HOME="$TMPDIR_BASE/home"
+  mkdir -p "$HOME"
   cd "$PROJECT_DIR"
   # git needs user info for commits
   export GIT_AUTHOR_NAME="test"
@@ -421,94 +423,143 @@ test_hook_install_idempotent() {
 # ─── mcp tests ────────────────────────────────────────────────────────────────
 
 test_mcp_install() {
-  export HOME="$TMPDIR_BASE"
+  cd "$PROJECT_DIR"
   "$AI_INST" mcp install 2>&1
-  assert_file_exists "$TMPDIR_BASE/.claude/settings.json" "settings created"
+  assert_file_exists "$PROJECT_DIR/.mcp.json" ".mcp.json created"
   local content
-  content="$(cat "$TMPDIR_BASE/.claude/settings.json")"
+  content="$(cat "$PROJECT_DIR/.mcp.json")"
   assert_contains "$content" '"ai-inst"' "has ai-inst key"
   assert_contains "$content" '"npx"' "has npx command"
   assert_contains "$content" '"tsx"' "has tsx arg"
   assert_contains "$content" 'mcp-server/src/index.ts' "has mcp-server path"
+  assert_contains "$content" '"mcpServers"' "has mcpServers wrapper"
 }
 
 test_mcp_install_idempotent() {
-  export HOME="$TMPDIR_BASE"
+  cd "$PROJECT_DIR"
   "$AI_INST" mcp install 2>&1
   local output
   output="$("$AI_INST" mcp install 2>&1)"
   assert_contains "$output" "already configured" "idempotent message"
   # verify file is still valid JSON
-  node -e "JSON.parse(require('fs').readFileSync('$TMPDIR_BASE/.claude/settings.json','utf-8'))" 2>&1
+  node -e "JSON.parse(require('fs').readFileSync('$PROJECT_DIR/.mcp.json','utf-8'))" 2>&1
 }
 
-test_mcp_install_into_existing_settings() {
-  export HOME="$TMPDIR_BASE"
-  mkdir -p "$TMPDIR_BASE/.claude"
-  echo '{"someKey": "someValue"}' > "$TMPDIR_BASE/.claude/settings.json"
+test_mcp_install_into_existing_mcp_json() {
+  cd "$PROJECT_DIR"
+  echo '{"mcpServers": {"other": {"command": "test"}}}' > "$PROJECT_DIR/.mcp.json"
   "$AI_INST" mcp install 2>&1
   local content
-  content="$(cat "$TMPDIR_BASE/.claude/settings.json")"
-  assert_contains "$content" '"someKey"' "preserves existing key"
-  assert_contains "$content" '"ai-inst"' "has ai-inst"
-}
-
-test_mcp_install_into_existing_mcp_servers() {
-  export HOME="$TMPDIR_BASE"
-  mkdir -p "$TMPDIR_BASE/.claude"
-  echo '{"mcpServers": {"other": {"command": "test"}}}' > "$TMPDIR_BASE/.claude/settings.json"
-  "$AI_INST" mcp install 2>&1
-  local content
-  content="$(cat "$TMPDIR_BASE/.claude/settings.json")"
+  content="$(cat "$PROJECT_DIR/.mcp.json")"
   assert_contains "$content" '"other"' "preserves other server"
   assert_contains "$content" '"ai-inst"' "has ai-inst"
 }
 
-test_mcp_install_project() {
-  export HOME="$TMPDIR_BASE"
-  cd "$PROJECT_DIR"
-  "$AI_INST" mcp install --project 2>&1
-  assert_file_exists "$PROJECT_DIR/.claude/settings.json" "project settings created"
-  local content
-  content="$(cat "$PROJECT_DIR/.claude/settings.json")"
-  assert_contains "$content" '"ai-inst"' "has ai-inst key"
-  # user-level should NOT be created
-  assert_file_not_exists "$TMPDIR_BASE/.claude/settings.json" "user settings not created"
-}
-
 test_mcp_remove() {
-  export HOME="$TMPDIR_BASE"
+  cd "$PROJECT_DIR"
   "$AI_INST" mcp install 2>&1
   "$AI_INST" mcp remove 2>&1
   local content
-  content="$(cat "$TMPDIR_BASE/.claude/settings.json")"
+  content="$(cat "$PROJECT_DIR/.mcp.json")"
   assert_not_contains "$content" '"ai-inst"' "ai-inst removed"
   # file should still be valid JSON
-  node -e "JSON.parse(require('fs').readFileSync('$TMPDIR_BASE/.claude/settings.json','utf-8'))" 2>&1
+  node -e "JSON.parse(require('fs').readFileSync('$PROJECT_DIR/.mcp.json','utf-8'))" 2>&1
 }
 
 test_mcp_remove_not_installed() {
-  export HOME="$TMPDIR_BASE"
-  mkdir -p "$TMPDIR_BASE/.claude"
-  echo '{"mcpServers": {}}' > "$TMPDIR_BASE/.claude/settings.json"
+  cd "$PROJECT_DIR"
+  echo '{"mcpServers": {}}' > "$PROJECT_DIR/.mcp.json"
   local output
   output="$("$AI_INST" mcp remove 2>&1)"
   assert_contains "$output" "not found" "not found message"
 }
 
+test_mcp_remove_no_file() {
+  cd "$PROJECT_DIR"
+  local output
+  output="$("$AI_INST" mcp remove 2>&1 || true)"
+  assert_contains "$output" "not found" "error when no .mcp.json"
+}
+
 test_mcp_status_not_installed() {
-  export HOME="$TMPDIR_BASE"
+  cd "$PROJECT_DIR"
   local output
   output="$("$AI_INST" mcp status 2>&1)"
+  assert_contains "$output" "Claude Code" "shows Claude Code in header"
   assert_contains "$output" "not installed" "shows not installed"
 }
 
 test_mcp_status_installed() {
-  export HOME="$TMPDIR_BASE"
+  cd "$PROJECT_DIR"
   "$AI_INST" mcp install 2>&1
   local output
   output="$("$AI_INST" mcp status 2>&1)"
+  assert_contains "$output" "Claude Code" "shows Claude Code in header"
   assert_contains "$output" "installed" "shows installed"
+}
+
+test_mcp_install_with_claude_flag() {
+  cd "$PROJECT_DIR"
+  "$AI_INST" mcp install --claude 2>&1
+  assert_file_exists "$PROJECT_DIR/.mcp.json" ".mcp.json created with --claude"
+  local content
+  content="$(cat "$PROJECT_DIR/.mcp.json")"
+  assert_contains "$content" '"ai-inst"' "has ai-inst key"
+}
+
+test_mcp_install_codex_local() {
+  cd "$PROJECT_DIR"
+  "$AI_INST" mcp install --codex 2>&1
+  local cfg="$PROJECT_DIR/.codex/config.toml"
+  assert_file_exists "$cfg" "codex project config created"
+  local content
+  content="$(cat "$cfg")"
+  assert_contains "$content" "[mcp_servers.ai-inst]" "codex entry header"
+  assert_contains "$content" "command = \"npx\"" "codex command"
+  assert_contains "$content" "tsx" "codex args"
+}
+
+test_mcp_install_codex_global() {
+  cd "$PROJECT_DIR"
+  "$AI_INST" mcp install --codex --global 2>&1
+  local cfg="$HOME/.codex/config.toml"
+  assert_file_exists "$cfg" "codex global config created"
+  local content
+  content="$(cat "$cfg")"
+  assert_contains "$content" "[mcp_servers.ai-inst]" "global codex entry header"
+}
+
+test_mcp_remove_codex_local() {
+  cd "$PROJECT_DIR"
+  "$AI_INST" mcp install --codex 2>&1
+  "$AI_INST" mcp remove --codex 2>&1
+  local cfg="$PROJECT_DIR/.codex/config.toml"
+  local content
+  content="$(cat "$cfg")"
+  assert_not_contains "$content" "[mcp_servers.ai-inst]" "codex local entry removed"
+}
+
+test_mcp_remove_codex_global() {
+  cd "$PROJECT_DIR"
+  "$AI_INST" mcp install --codex --global 2>&1
+  "$AI_INST" mcp remove --codex --global 2>&1
+  local cfg="$HOME/.codex/config.toml"
+  local content
+  content="$(cat "$cfg")"
+  assert_not_contains "$content" "[mcp_servers.ai-inst]" "codex global entry removed"
+}
+
+test_mcp_status_codex() {
+  cd "$PROJECT_DIR"
+  local output
+  output="$("$AI_INST" mcp status --codex 2>&1)"
+  assert_contains "$output" "MCP server status (Codex)" "codex header"
+  assert_contains "$output" "Global:  not installed" "global not installed default"
+  assert_contains "$output" "Project: not installed" "project not installed default"
+
+  "$AI_INST" mcp install --codex 2>&1
+  output="$("$AI_INST" mcp status --codex 2>&1)"
+  assert_contains "$output" "Project: installed" "project installed after add"
 }
 
 # ─── edge case tests ─────────────────────────────────────────────────────────
@@ -585,13 +636,18 @@ echo ""
 echo "mcp:"
 run_test test_mcp_install
 run_test test_mcp_install_idempotent
-run_test test_mcp_install_into_existing_settings
-run_test test_mcp_install_into_existing_mcp_servers
-run_test test_mcp_install_project
+run_test test_mcp_install_into_existing_mcp_json
 run_test test_mcp_remove
 run_test test_mcp_remove_not_installed
+run_test test_mcp_remove_no_file
 run_test test_mcp_status_not_installed
 run_test test_mcp_status_installed
+run_test test_mcp_install_with_claude_flag
+run_test test_mcp_install_codex_local
+run_test test_mcp_install_codex_global
+run_test test_mcp_remove_codex_local
+run_test test_mcp_remove_codex_global
+run_test test_mcp_status_codex
 
 echo ""
 echo "edge cases:"

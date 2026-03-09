@@ -1,6 +1,6 @@
 # ai-inst
 
-Modular AI agent instruction manager. Store, sync, and build instructions for AI coding agents (Claude Code, Cursor, GitHub Copilot) across projects and hosts.
+Modular AI agent instruction manager. Store, sync, and build instructions for AI coding agents (Claude Code, Codex, Cursor, GitHub Copilot) across projects and hosts.
 
 ## Quick Start
 
@@ -73,6 +73,13 @@ Two repositories:
 | `ai-inst hook install` | Install git hooks for auto-build |
 | `ai-inst hook remove` | Remove hooks |
 
+### MCP
+| Command | Description |
+|---------|-------------|
+| `ai-inst mcp install [--claude\|--codex] [--global]` | Install MCP server for Claude Code or Codex |
+| `ai-inst mcp remove [--claude\|--codex] [--global]` | Remove MCP server for Claude Code or Codex |
+| `ai-inst mcp status [--claude\|--codex]` | Show MCP installation status |
+
 ## `.ai-modules` format
 
 ```ini
@@ -89,9 +96,44 @@ framework-fastapi
 
 The MCP server wraps the CLI for direct AI agent integration.
 
-### Setup (Claude Code)
+### Setup via CLI
 
-Add to `~/.claude/settings.json`:
+Use built-in commands instead of manual edits:
+
+```bash
+# Claude Code (project-local: .mcp.json)
+ai-inst mcp install --claude
+
+# Claude Code (global)
+ai-inst mcp install --claude --global
+
+# Codex (project-local: .codex/config.toml)
+ai-inst mcp install --codex
+
+# Codex (global)
+ai-inst mcp install --codex --global
+```
+
+Check and remove configuration:
+
+```bash
+ai-inst mcp status --claude
+ai-inst mcp status --codex
+
+ai-inst mcp remove --claude
+ai-inst mcp remove --codex --global
+```
+
+Notes:
+- `ai-inst mcp install` defaults to Claude (`--claude`).
+- Claude global install uses `claude mcp add ...` and requires the `claude` CLI.
+- Codex config is written to `.codex/config.toml` (project) or `~/.codex/config.toml` (global).
+
+### Manual setup (optional)
+
+If you need to configure manually:
+
+Claude (`.mcp.json`):
 
 ```json
 {
@@ -102,6 +144,14 @@ Add to `~/.claude/settings.json`:
     }
   }
 }
+```
+
+Codex (`.codex/config.toml` or `~/.codex/config.toml`):
+
+```toml
+[mcp_servers.ai-inst]
+command = "npx"
+args = ["tsx", "/path/to/ai-inst/mcp-server/src/index.ts"]
 ```
 
 ## New Host Setup
