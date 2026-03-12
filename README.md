@@ -29,7 +29,9 @@ ai-inst build
 Two repositories:
 
 1. **Tool repo** (`ai-inst`) — this repo, the CLI + MCP server
-2. **Rules repo** (`~/.ai-instructions`) — your personal modules, synced via git
+2. **Rules repo** (`~/.ai-instructions`) — your personal modules and skills, synced via git
+
+**Modules** are always injected into the agent context at build time. **Skills** ([Agent Skills](https://agentskills.io) standard) are loaded on demand — the agent sees a description index and fetches full instructions only when needed, keeping the context lean.
 
 ## Commands
 
@@ -51,12 +53,23 @@ Two repositories:
 | `ai-inst rm <name>` | Delete module |
 | `ai-inst push [-m "msg"]` | Commit & push |
 
+### Skills
+| Command | Description |
+|---------|-------------|
+| `ai-inst skill list` | List skills (`*` = active in project) |
+| `ai-inst skill new <name>` | Create skill |
+| `ai-inst skill edit <name>` | Edit skill |
+| `ai-inst skill show <name>` | Show skill content |
+| `ai-inst skill rm <name>` | Delete skill |
+
 ### Project
 | Command | Description |
 |---------|-------------|
 | `ai-inst project init` | Create `.ai-modules` + `instructions.local.md` |
 | `ai-inst project add <mod...>` | Add modules |
 | `ai-inst project rm <mod...>` | Remove modules |
+| `ai-inst project add-skill <skill...>` | Add skills |
+| `ai-inst project rm-skill <skill...>` | Remove skills |
 | `ai-inst project edit` | Edit local instructions |
 | `ai-inst project status` | Show status |
 | `ai-inst project targets <file...>` | Set target files |
@@ -86,11 +99,19 @@ Two repositories:
 # Target files (default: CLAUDE.md)
 targets: CLAUDE.md .cursorrules AGENTS.md
 
-# Modules (in order)
+# Modules — always in context
 common
 lang-python
 framework-fastapi
+
+# Skills — loaded on demand
+[skills]
+deploy
+refactor
+db-migrate
 ```
+
+Skills follow the [Agent Skills](https://agentskills.io) standard and are deployed to `.claude/skills/` and `.agents/skills/` during `ai-inst build`, covering Claude Code, Codex, Cursor, Roo Code, and Windsurf.
 
 ## MCP Server
 

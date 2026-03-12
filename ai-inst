@@ -4,7 +4,10 @@ set -euo pipefail
 VERSION="0.1.0"
 AI_INST_DIR="${AI_INST_DIR:-$HOME/.ai-instructions}"
 MODULES_DIR="$AI_INST_DIR/modules"
+SKILLS_DIR="$AI_INST_DIR/skills"
+MIGRATIONS_DIR="$AI_INST_DIR/migrations"
 AI_MODULES_FILE=".ai-modules"
+AI_MIGRATIONS_STATE=".ai-migrations-state"
 LOCAL_INSTRUCTIONS="instructions.local.md"
 DEFAULT_TARGET="CLAUDE.md"
 
@@ -25,16 +28,34 @@ module_path() { echo "$MODULES_DIR/$1.md"; }
 
 module_exists() { [[ -f "$(module_path "$1")" ]]; }
 
-# Parse .ai-modules → targets and module list
+skill_path() { echo "$SKILLS_DIR/$1"; }
+
+skill_exists() { [[ -d "$SKILLS_DIR/$1" && -f "$SKILLS_DIR/$1/SKILL.md" ]]; }
+
+skill_description() {
+  local skill_md="$SKILLS_DIR/$1/SKILL.md"
+  [[ -f "$skill_md" ]] || return
+  sed -n '/^---$/,/^---$/{ /^description:/{ s/^description: *//; s/^ *"//; s/" *$//; p; q; } }' "$skill_md"
+}
+
+# Parse .ai-modules → targets, module list, and skills list
 parse_ai_modules() {
   local targets=()
   local modules=()
+  local skills=()
+  local in_skills=0
   while IFS= read -r line; do
     line="${line%%#*}"
     line="$(echo "$line" | xargs)" # trim
     [[ -z "$line" ]] && continue
+    if [[ "$line" == "[skills]" ]]; then
+      in_skills=1
+      continue
+    fi
     if [[ "$line" == targets:* ]]; then
       read -ra targets <<< "${line#targets:}"
+    elif [[ "$in_skills" -eq 1 ]]; then
+      skills+=("$line")
     else
       modules+=("$line")
     fi
@@ -42,6 +63,7 @@ parse_ai_modules() {
   [[ ${#targets[@]} -eq 0 ]] && targets=("$DEFAULT_TARGET")
   echo "TARGETS='${targets[*]}'"
   echo "MODULES='${modules[*]}'"
+  echo "SKILLS='${skills[*]}'"
 }
 
 git_commit_repo() {
@@ -52,6 +74,29 @@ git_commit_repo() {
     git commit -m "$msg"
   fi
   cd - > /dev/null
+}
+
+# Ensure entries exist in .gitignore (idempotent)
+gitignore_ensure() {
+  local gitignore=".gitignore"
+  touch "$gitignore"
+  for entry in "$@"; do
+    grep -qxF "$entry" "$gitignore" 2>/dev/null || echo "$entry" >> "$gitignore"
+  done
+}
+
+# Parse .ai-modules and populate TARGETS_ARR, MODULES_ARR, SKILLS_ARR
+load_project_config() {
+  eval "$(parse_ai_modules)"
+  TARGETS_ARR=()
+  MODULES_ARR=()
+  SKILLS_ARR=()
+  # shellcheck disable=SC2086
+  [[ -n "${TARGETS:-}" ]] && read -ra TARGETS_ARR <<< "$TARGETS" || true
+  # shellcheck disable=SC2086
+  [[ -n "${MODULES:-}" ]] && read -ra MODULES_ARR <<< "$MODULES" || true
+  # shellcheck disable=SC2086
+  [[ -n "${SKILLS:-}" ]] && read -ra SKILLS_ARR <<< "$SKILLS" || true
 }
 
 # ─── repo commands ────────────────────────────────────────────────────────────
@@ -71,6 +116,8 @@ cmd_repo_init() {
   fi
 
   mkdir -p "$MODULES_DIR"
+  mkdir -p "$SKILLS_DIR"
+  mkdir -p "$MIGRATIONS_DIR"
   cd "$AI_INST_DIR"
   git init
 
@@ -181,12 +228,8 @@ cmd_list() {
   ensure_repo
   local project_modules=()
   if [[ -f "$AI_MODULES_FILE" ]]; then
-    while IFS= read -r line; do
-      line="${line%%#*}"
-      line="$(echo "$line" | xargs)"
-      [[ -z "$line" || "$line" == targets:* ]] && continue
-      project_modules+=("$line")
-    done < "$AI_MODULES_FILE"
+    load_project_config
+    project_modules=("${MODULES_ARR[@]+"${MODULES_ARR[@]}"}")
   fi
 
   for f in "$MODULES_DIR"/*.md; do
@@ -262,6 +305,105 @@ cmd_rm() {
   info "Module '$name' removed"
 }
 
+# ─── Skill commands ───────────────────────────────────────────────────────────
+
+cmd_skill_new() {
+  ensure_repo
+  local name="${1:-}"
+  [[ -z "$name" ]] && die "Usage: ai-inst skill new <name>"
+  skill_exists "$name" && die "Skill '$name' already exists"
+
+  mkdir -p "$SKILLS_DIR/$name"
+  cat > "$SKILLS_DIR/$name/SKILL.md" << EOF
+---
+name: $name
+description:
+---
+
+# $name
+
+<!-- Add skill instructions here -->
+EOF
+
+  if [[ -n "${EDITOR:-}" ]]; then
+    "$EDITOR" "$SKILLS_DIR/$name/SKILL.md"
+  fi
+  git_commit_repo "add skill: $name"
+  info "Skill '$name' created"
+}
+
+cmd_skill_list() {
+  ensure_repo
+  local project_skills=()
+  if [[ -f "$AI_MODULES_FILE" ]]; then
+    load_project_config
+    project_skills=("${SKILLS_ARR[@]+"${SKILLS_ARR[@]}"}")
+  fi
+
+  for d in "$SKILLS_DIR"/*/; do
+    [[ -d "$d" ]] || continue
+    [[ -f "$d/SKILL.md" ]] || continue
+    local name
+    name="$(basename "$d")"
+    local marker=" "
+    for ps in "${project_skills[@]+"${project_skills[@]}"}"; do
+      if [[ "$ps" == "$name" ]]; then
+        marker="*"
+        break
+      fi
+    done
+    echo " $marker $name"
+  done
+}
+
+cmd_skill_show() {
+  ensure_repo
+  local name="${1:-}"
+  [[ -z "$name" ]] && die "Usage: ai-inst skill show <name>"
+  skill_exists "$name" || die "Skill '$name' not found"
+  cat "$SKILLS_DIR/$name/SKILL.md"
+}
+
+cmd_skill_edit() {
+  ensure_repo
+  local name="${1:-}"
+  [[ -z "$name" ]] && die "Usage: ai-inst skill edit <name>"
+  skill_exists "$name" || die "Skill '$name' not found"
+
+  if [[ -n "${EDITOR:-}" ]]; then
+    "$EDITOR" "$SKILLS_DIR/$name/SKILL.md"
+  else
+    die "No \$EDITOR set"
+  fi
+  git_commit_repo "edit skill: $name"
+  info "Skill '$name' updated"
+}
+
+cmd_skill_rm() {
+  ensure_repo
+  local name="${1:-}"
+  [[ -z "$name" ]] && die "Usage: ai-inst skill rm <name>"
+  skill_exists "$name" || die "Skill '$name' not found"
+  rm -rf "$SKILLS_DIR/$name"
+  git_commit_repo "remove skill: $name"
+  info "Skill '$name' removed"
+}
+
+cmd_skill() {
+  local subcmd="${1:-}"
+  shift || true
+  case "$subcmd" in
+    new)   cmd_skill_new "$@" ;;
+    list)  cmd_skill_list "$@" ;;
+    show)  cmd_skill_show "$@" ;;
+    edit)  cmd_skill_edit "$@" ;;
+    rm)    cmd_skill_rm "$@" ;;
+    *)     die "Usage: ai-inst skill {new|list|show|edit|rm}" ;;
+  esac
+}
+
+# ─── Push ──────────────────────────────────────────────────────────────────
+
 cmd_push() {
   ensure_repo
   local msg="update modules"
@@ -306,14 +448,7 @@ EOF
     info "Created $LOCAL_INSTRUCTIONS"
   fi
 
-  # Update .gitignore
-  local gitignore=".gitignore"
-  touch "$gitignore"
-  for target in CLAUDE.md .cursorrules AGENTS.md; do
-    if ! grep -qxF "$target" "$gitignore" 2>/dev/null; then
-      echo "$target" >> "$gitignore"
-    fi
-  done
+  gitignore_ensure CLAUDE.md .cursorrules AGENTS.md
   info "Updated .gitignore"
 }
 
@@ -350,6 +485,58 @@ cmd_project_rm() {
   done
 }
 
+cmd_project_add_skill() {
+  ensure_project
+  ensure_repo
+  [[ $# -eq 0 ]] && die "Usage: ai-inst project add-skill <skill...>"
+
+  for name in "$@"; do
+    skill_exists "$name" || die "Skill '$name' not found in rules repo"
+
+    load_project_config
+
+    local already=0
+    for s in "${SKILLS_ARR[@]+"${SKILLS_ARR[@]}"}"; do
+      [[ "$s" == "$name" ]] && already=1 && break
+    done
+
+    if [[ $already -eq 1 ]]; then
+      info "Skill '$name' already in project"
+    else
+      if grep -q '^\[skills\]' "$AI_MODULES_FILE" 2>/dev/null; then
+        echo "$name" >> "$AI_MODULES_FILE"
+      else
+        printf '\n[skills]\n%s\n' "$name" >> "$AI_MODULES_FILE"
+      fi
+      info "Added skill '$name'"
+    fi
+  done
+}
+
+cmd_project_rm_skill() {
+  ensure_project
+  [[ $# -eq 0 ]] && die "Usage: ai-inst project rm-skill <skill...>"
+
+  for name in "$@"; do
+    load_project_config
+
+    local found=0
+    for s in "${SKILLS_ARR[@]+"${SKILLS_ARR[@]}"}"; do
+      [[ "$s" == "$name" ]] && found=1 && break
+    done
+
+    if [[ $found -eq 1 ]]; then
+      local tmpfile
+      tmpfile="$(mktemp)"
+      grep -vxF "$name" "$AI_MODULES_FILE" > "$tmpfile"
+      mv "$tmpfile" "$AI_MODULES_FILE"
+      info "Removed skill '$name'"
+    else
+      info "Skill '$name' not in project"
+    fi
+  done
+}
+
 cmd_project_edit() {
   [[ -f "$LOCAL_INSTRUCTIONS" ]] || die "No $LOCAL_INSTRUCTIONS found. Run: ai-inst project init"
   if [[ -n "${EDITOR:-}" ]]; then
@@ -365,16 +552,13 @@ cmd_project_status() {
   echo "Project: $(pwd)"
   echo ""
 
-  eval "$(parse_ai_modules)"
-  # shellcheck disable=SC2086
-  read -ra targets_arr <<< "$TARGETS"
-  # shellcheck disable=SC2086
-  read -ra modules_arr <<< "$MODULES"
+  load_project_config
 
-  echo "Targets: ${targets_arr[*]}"
+  echo "Targets: ${TARGETS_ARR[*]}"
   echo ""
   echo "Modules:"
-  for m in "${modules_arr[@]+"${modules_arr[@]}"}"; do
+  for m in "${MODULES_ARR[@]+"${MODULES_ARR[@]}"}"; do
+    [[ -z "$m" ]] && continue
     if module_exists "$m"; then
       echo "  + $m"
     else
@@ -382,9 +566,22 @@ cmd_project_status() {
     fi
   done
 
+  if [[ ${#SKILLS_ARR[@]} -gt 0 ]]; then
+    echo ""
+    echo "Skills:"
+    for s in "${SKILLS_ARR[@]}"; do
+      [[ -z "$s" ]] && continue
+      if skill_exists "$s"; then
+        echo "  + $s"
+      else
+        echo "  ! $s (not found)"
+      fi
+    done
+  fi
+
   echo ""
   echo "Built files:"
-  for t in "${targets_arr[@]}"; do
+  for t in "${TARGETS_ARR[@]}"; do
     if [[ -f "$t" ]]; then
       echo "  + $t ($(wc -l < "$t") lines)"
     else
@@ -417,28 +614,375 @@ cmd_project_targets() {
   fi
   info "Targets set to: $*"
 
-  # Update .gitignore
-  local gitignore=".gitignore"
-  touch "$gitignore"
-  for target in "$@"; do
-    if ! grep -qxF "$target" "$gitignore" 2>/dev/null; then
-      echo "$target" >> "$gitignore"
-    fi
-  done
+  gitignore_ensure "$@"
 }
 
 cmd_project() {
   local subcmd="${1:-}"
   shift || true
   case "$subcmd" in
-    init)    cmd_project_init "$@" ;;
-    add)     cmd_project_add "$@" ;;
-    rm)      cmd_project_rm "$@" ;;
-    edit)    cmd_project_edit "$@" ;;
-    status)  cmd_project_status "$@" ;;
-    targets) cmd_project_targets "$@" ;;
-    *)       die "Usage: ai-inst project {init|add|rm|edit|status|targets}" ;;
+    init)      cmd_project_init "$@" ;;
+    add)       cmd_project_add "$@" ;;
+    rm)        cmd_project_rm "$@" ;;
+    edit)      cmd_project_edit "$@" ;;
+    status)    cmd_project_status "$@" ;;
+    targets)   cmd_project_targets "$@" ;;
+    add-skill) cmd_project_add_skill "$@" ;;
+    rm-skill)  cmd_project_rm_skill "$@" ;;
+    *)         die "Usage: ai-inst project {init|add|rm|edit|status|targets|add-skill|rm-skill}" ;;
   esac
+}
+
+# ─── Migrations ───────────────────────────────────────────────────────────────
+
+# Parse a migration YAML file → sets MIGRATION_ID, MIGRATION_DESC, MIGRATION_RULES[]
+# Each rule is encoded as "when_key=when_val|then_key1=then_val1|then_key2=then_val2"
+parse_migration() {
+  local file="$1"
+  MIGRATION_ID=""
+  MIGRATION_DESC=""
+  MIGRATION_RULES=()
+
+  local section="" when_part="" then_parts=""
+  while IFS= read -r line; do
+    # strip comments and trailing whitespace
+    line="${line%%#*}"
+    [[ -z "${line// /}" ]] && continue
+
+    if [[ "$line" =~ ^id:\ *\"?([^\"]*)\"? ]]; then
+      MIGRATION_ID="${BASH_REMATCH[1]}"
+      continue
+    fi
+    if [[ "$line" =~ ^description:\ *\"?([^\"]*)\"? ]]; then
+      MIGRATION_DESC="${BASH_REMATCH[1]}"
+      continue
+    fi
+    if [[ "$line" == "rules:" ]]; then
+      section="rules"
+      continue
+    fi
+
+    if [[ "$section" == "rules" ]]; then
+      # new rule entry: "  - when:"
+      if [[ "$line" =~ ^[[:space:]]*-[[:space:]]*when: ]]; then
+        # save previous rule if any
+        if [[ -n "$when_part" ]]; then
+          MIGRATION_RULES+=("${when_part}${then_parts}")
+        fi
+        when_part=""
+        then_parts=""
+        section="when"
+        continue
+      fi
+    fi
+
+    if [[ "$section" == "when" ]]; then
+      if [[ "$line" =~ ^[[:space:]]*then: ]]; then
+        section="then"
+        continue
+      fi
+      # parse condition: "      has_module: typescript"
+      local trimmed
+      trimmed="$(echo "$line" | xargs)"
+      local key="${trimmed%%:*}"
+      local val="${trimmed#*: }"
+      when_part="${key}=${val}"
+    fi
+
+    if [[ "$section" == "then" ]]; then
+      # next rule or end
+      if [[ "$line" =~ ^[[:space:]]*-[[:space:]]*when: ]]; then
+        MIGRATION_RULES+=("${when_part}${then_parts}")
+        when_part=""
+        then_parts=""
+        section="when"
+        continue
+      fi
+      local trimmed
+      trimmed="$(echo "$line" | xargs)"
+      local key="${trimmed%%:*}"
+      local val="${trimmed#*: }"
+      then_parts+="|${key}=${val}"
+    fi
+  done < "$file"
+
+  # save last rule
+  if [[ -n "$when_part" ]]; then
+    MIGRATION_RULES+=("${when_part}${then_parts}")
+  fi
+}
+
+# Check if migration ID has been applied
+migration_is_applied() {
+  local id="$1"
+  [[ -f "$AI_MIGRATIONS_STATE" ]] && grep -qxF "$id" "$AI_MIGRATIONS_STATE" 2>/dev/null
+}
+
+# Check a when-condition against current project config
+migration_check_condition() {
+  local cond="$1"
+  local key="${cond%%=*}"
+  local val="${cond#*=}"
+
+  case "$key" in
+    has_module)
+      for m in "${MODULES_ARR[@]+"${MODULES_ARR[@]}"}"; do
+        [[ "$m" == "$val" ]] && return 0
+      done
+      return 1
+      ;;
+    has_skill)
+      for s in "${SKILLS_ARR[@]+"${SKILLS_ARR[@]}"}"; do
+        [[ "$s" == "$val" ]] && return 0
+      done
+      return 1
+      ;;
+    not_has_skill)
+      for s in "${SKILLS_ARR[@]+"${SKILLS_ARR[@]}"}"; do
+        [[ "$s" == "$val" ]] && return 1
+      done
+      return 0
+      ;;
+    not_has_module)
+      for m in "${MODULES_ARR[@]+"${MODULES_ARR[@]}"}"; do
+        [[ "$m" == "$val" ]] && return 1
+      done
+      return 0
+      ;;
+    *)
+      echo "warning: unknown condition '$key' in migration" >&2
+      return 1
+      ;;
+  esac
+}
+
+# Apply a then-action to the project
+migration_apply_action() {
+  local action="$1"
+  local key="${action%%=*}"
+  local val="${action#*=}"
+
+  case "$key" in
+    add_module)
+      # Only add if not already present
+      local found=0
+      for m in "${MODULES_ARR[@]+"${MODULES_ARR[@]}"}"; do
+        [[ "$m" == "$val" ]] && found=1 && break
+      done
+      if [[ $found -eq 0 ]]; then
+        # Add before [skills] section if it exists, otherwise append
+        if grep -q '^\[skills\]' "$AI_MODULES_FILE" 2>/dev/null; then
+          local tmpfile
+          tmpfile="$(mktemp)"
+          sed "/^\[skills\]/i $val" "$AI_MODULES_FILE" > "$tmpfile"
+          mv "$tmpfile" "$AI_MODULES_FILE"
+        else
+          echo "$val" >> "$AI_MODULES_FILE"
+        fi
+        info "  + add module: $val"
+      fi
+      ;;
+    remove_module)
+      if grep -qxF "$val" "$AI_MODULES_FILE" 2>/dev/null; then
+        local tmpfile
+        tmpfile="$(mktemp)"
+        grep -vxF "$val" "$AI_MODULES_FILE" > "$tmpfile"
+        mv "$tmpfile" "$AI_MODULES_FILE"
+        info "  - remove module: $val"
+      fi
+      ;;
+    add_skill)
+      # Check if already present
+      load_project_config
+      local found=0
+      for s in "${SKILLS_ARR[@]+"${SKILLS_ARR[@]}"}"; do
+        [[ "$s" == "$val" ]] && found=1 && break
+      done
+      if [[ $found -eq 0 ]]; then
+        if grep -q '^\[skills\]' "$AI_MODULES_FILE" 2>/dev/null; then
+          echo "$val" >> "$AI_MODULES_FILE"
+        else
+          printf '\n[skills]\n%s\n' "$val" >> "$AI_MODULES_FILE"
+        fi
+        info "  + add skill: $val"
+      fi
+      ;;
+    remove_skill)
+      if grep -qxF "$val" "$AI_MODULES_FILE" 2>/dev/null; then
+        local tmpfile
+        tmpfile="$(mktemp)"
+        grep -vxF "$val" "$AI_MODULES_FILE" > "$tmpfile"
+        mv "$tmpfile" "$AI_MODULES_FILE"
+        info "  - remove skill: $val"
+      fi
+      ;;
+    *)
+      echo "warning: unknown action '$key' in migration" >&2
+      ;;
+  esac
+}
+
+# Apply a single migration file
+apply_migration() {
+  local file="$1"
+  parse_migration "$file"
+
+  [[ -z "$MIGRATION_ID" ]] && { echo "warning: migration without id, skipping: $file" >&2; return; }
+
+  if migration_is_applied "$MIGRATION_ID"; then
+    return
+  fi
+
+  load_project_config
+
+  local applied_any=0
+  for rule in "${MIGRATION_RULES[@]+"${MIGRATION_RULES[@]}"}"; do
+    # Split: first part is condition, rest are actions
+    local cond="${rule%%|*}"
+    local actions="${rule#*|}"
+
+    if migration_check_condition "$cond"; then
+      # Apply each action
+      while [[ -n "$actions" ]]; do
+        local action
+        if [[ "$actions" == *"|"* ]]; then
+          action="${actions%%|*}"
+          actions="${actions#*|}"
+        else
+          action="$actions"
+          actions=""
+        fi
+        [[ -z "$action" ]] && continue
+        migration_apply_action "$action"
+        applied_any=1
+      done
+      # Reload config after actions
+      load_project_config
+    fi
+  done
+
+  # Mark as applied
+  echo "$MIGRATION_ID" >> "$AI_MIGRATIONS_STATE"
+
+  if [[ $applied_any -eq 1 ]]; then
+    info "Applied migration: $MIGRATION_ID"
+  fi
+}
+
+cmd_migrate() {
+  ensure_project
+  ensure_repo
+
+  local show_status=0
+  local create_slug=""
+  local create_desc=""
+  local -a create_rules=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --status) show_status=1; shift ;;
+      --create) create_slug="$2"; shift 2 ;;
+      --description) create_desc="$2"; shift 2 ;;
+      --rule) create_rules+=("$2"); shift 2 ;;
+      *) die "Unknown option: $1" ;;
+    esac
+  done
+
+  if [[ -n "$create_slug" ]]; then
+    mkdir -p "$MIGRATIONS_DIR"
+    local timestamp
+    timestamp="$(date +%Y-%m-%d)"
+    local filename="${timestamp}-${create_slug}.yml"
+    local filepath="$MIGRATIONS_DIR/$filename"
+    [[ -f "$filepath" ]] && die "Migration file already exists: $filename"
+
+    local mid="${timestamp}-${create_slug}"
+
+    if [[ ${#create_rules[@]} -gt 0 ]]; then
+      # Build YAML from parameters
+      {
+        echo "id: \"$mid\""
+        echo "description: \"$create_desc\""
+        echo "rules:"
+        for rule in "${create_rules[@]}"; do
+          # Format: "when_key:when_val->then_key1:then_val1,then_key2:then_val2"
+          local when_part="${rule%%->*}"
+          local then_part="${rule#*->}"
+          local when_key="${when_part%%:*}"
+          local when_val="${when_part#*:}"
+          echo "  - when:"
+          echo "      ${when_key}: ${when_val}"
+          echo "    then:"
+          IFS=',' read -ra actions <<< "$then_part"
+          for action in "${actions[@]}"; do
+            local act_key="${action%%:*}"
+            local act_val="${action#*:}"
+            echo "      ${act_key}: ${act_val}"
+          done
+        done
+      } > "$filepath"
+    else
+      # Template fallback
+      cat > "$filepath" << EOF
+id: "$mid"
+description: "$create_desc"
+rules:
+  - when:
+      has_module: example
+    then:
+      add_skill: example
+EOF
+      if [[ -n "${EDITOR:-}" ]]; then
+        "$EDITOR" "$filepath"
+      fi
+    fi
+
+    git_commit_repo "add migration: $create_slug"
+    info "Migration created: $filename"
+    return
+  fi
+
+  if [[ ! -d "$MIGRATIONS_DIR" ]]; then
+    if [[ $show_status -eq 1 ]]; then info "No migrations directory found"; fi
+    return 0
+  fi
+
+  local migration_files=()
+  for f in "$MIGRATIONS_DIR"/*.yml; do
+    [[ -f "$f" ]] || continue
+    migration_files+=("$f")
+  done
+
+  if [[ ${#migration_files[@]} -eq 0 ]]; then
+    if [[ $show_status -eq 1 ]]; then info "No migrations found"; fi
+    return 0
+  fi
+
+  # Sort by filename (timestamp prefix ensures order)
+  IFS=$'\n' migration_files=($(sort <<< "${migration_files[*]}")); unset IFS
+
+  if [[ $show_status -eq 1 ]]; then
+    local pending=0
+    for f in "${migration_files[@]}"; do
+      parse_migration "$f"
+      if [[ -z "$MIGRATION_ID" ]]; then
+        continue
+      fi
+      if migration_is_applied "$MIGRATION_ID"; then
+        echo "  ✓ $MIGRATION_ID — ${MIGRATION_DESC:-no description}"
+      else
+        echo "  · $MIGRATION_ID — ${MIGRATION_DESC:-no description}"
+        pending=$((pending + 1))
+      fi
+    done
+    info "$pending pending migration(s)"
+    return
+  fi
+
+  for f in "${migration_files[@]}"; do
+    apply_migration "$f"
+  done
+
+  gitignore_ensure "$AI_MIGRATIONS_STATE"
 }
 
 # ─── Build ────────────────────────────────────────────────────────────────────
@@ -448,24 +992,28 @@ cmd_build() {
   ensure_repo
 
   local filter_target=""
+  local no_migrate=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --target) filter_target="$2"; shift 2 ;;
+      --no-migrate) no_migrate=1; shift ;;
       *) die "Unknown option: $1" ;;
     esac
   done
 
-  eval "$(parse_ai_modules)"
-  # shellcheck disable=SC2086
-  read -ra targets_arr <<< "$TARGETS"
-  # shellcheck disable=SC2086
-  read -ra modules_arr <<< "$MODULES"
+  # Run migrations before build unless --no-migrate
+  if [[ $no_migrate -eq 0 && -d "$MIGRATIONS_DIR" ]]; then
+    cmd_migrate
+  fi
+
+  load_project_config
 
   # Build content
   local content=""
   content="<!-- AUTO-GENERATED by ai-inst — do not edit manually -->"$'\n\n'
 
-  for m in "${modules_arr[@]+"${modules_arr[@]}"}"; do
+  for m in "${MODULES_ARR[@]+"${MODULES_ARR[@]}"}"; do
+    [[ -z "$m" ]] && continue
     local mpath
     mpath="$(module_path "$m")"
     if [[ -f "$mpath" ]]; then
@@ -474,6 +1022,24 @@ cmd_build() {
       echo "warning: module '$m' not found, skipping" >&2
     fi
   done
+
+  # Generate skills index
+  if [[ ${#SKILLS_ARR[@]} -gt 0 ]]; then
+    local skills_index
+    skills_index="## Available skills"$'\n\n'
+    skills_index+="The following skills are available on demand:"$'\n'
+    for s in "${SKILLS_ARR[@]}"; do
+      [[ -z "$s" ]] && continue
+      local desc
+      desc="$(skill_description "$s" 2>/dev/null || true)"
+      if [[ -n "$desc" ]]; then
+        skills_index+="- \`$s\` — $desc"$'\n'
+      else
+        skills_index+="- \`$s\`"$'\n'
+      fi
+    done
+    content+="$skills_index"$'\n'
+  fi
 
   if [[ -f "$LOCAL_INSTRUCTIONS" ]]; then
     local local_content
@@ -484,13 +1050,36 @@ cmd_build() {
   fi
 
   # Write to targets
-  for t in "${targets_arr[@]}"; do
+  for t in "${TARGETS_ARR[@]}"; do
     if [[ -n "$filter_target" && "$t" != "$filter_target" ]]; then
       continue
     fi
     echo "$content" > "$t"
     info "Built $t ($(wc -l < "$t") lines)"
   done
+
+  # Copy skills to platform directories
+  if [[ ${#SKILLS_ARR[@]} -gt 0 ]]; then
+    # Clean old skills dirs
+    rm -rf ".claude/skills" ".agents/skills"
+
+    local copied=0
+    for s in "${SKILLS_ARR[@]}"; do
+      [[ -z "$s" ]] && continue
+      if skill_exists "$s"; then
+        mkdir -p ".claude/skills/$s" ".agents/skills/$s"
+        cp -r "$SKILLS_DIR/$s/." ".claude/skills/$s/"
+        cp -r "$SKILLS_DIR/$s/." ".agents/skills/$s/"
+        copied=$((copied + 1))
+      else
+        echo "warning: skill '$s' not found, skipping" >&2
+      fi
+    done
+
+    [[ $copied -gt 0 ]] && info "Copied $copied skill(s) to .claude/skills/ and .agents/skills/"
+
+    gitignore_ensure ".claude/skills/" ".agents/skills/"
+  fi
 }
 
 # ─── Hooks ────────────────────────────────────────────────────────────────────
@@ -556,18 +1145,23 @@ cmd_hook() {
 
 # ─── MCP ───────────────────────────────────────────────────────────────────
 
-cmd_mcp_install() {
-  local scope="project" target="claude"
+# Parse --claude/--codex/--global options, sets MCP_SCOPE and MCP_TARGET
+mcp_parse_opts() {
+  MCP_SCOPE="project"
+  MCP_TARGET="claude"
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --global) scope="global"; shift ;;
-      --claude) target="claude"; shift ;;
-      --codex) target="codex"; shift ;;
-      *) die "Unknown option: $1. Usage: ai-inst mcp install [--claude|--codex] [--global]" ;;
+      --global) MCP_SCOPE="global"; shift ;;
+      --claude) MCP_TARGET="claude"; shift ;;
+      --codex)  MCP_TARGET="codex"; shift ;;
+      *) return 1 ;;
     esac
   done
+}
 
-  [[ "$target" == "claude" || "$target" == "codex" ]] || die "Unsupported target: $target. Use --claude or --codex."
+cmd_mcp_install() {
+  mcp_parse_opts "$@" || die "Unknown option. Usage: ai-inst mcp install [--claude|--codex] [--global]"
+  local scope="$MCP_SCOPE" target="$MCP_TARGET"
 
   # Determine MCP server path
   local script_path
@@ -685,17 +1279,8 @@ TOML
 }
 
 cmd_mcp_remove() {
-  local scope="project" target="claude"
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --global) scope="global"; shift ;;
-      --claude) target="claude"; shift ;;
-      --codex) target="codex"; shift ;;
-      *) die "Unknown option: $1. Usage: ai-inst mcp remove [--claude|--codex] [--global]" ;;
-    esac
-  done
-
-  [[ "$target" == "claude" || "$target" == "codex" ]] || die "Unsupported target: $target. Use --claude or --codex."
+  mcp_parse_opts "$@" || die "Unknown option. Usage: ai-inst mcp remove [--claude|--codex] [--global]"
+  local scope="$MCP_SCOPE" target="$MCP_TARGET"
 
   if [[ "$target" == "claude" ]]; then
     if [[ "$scope" == "global" ]]; then
@@ -773,16 +1358,8 @@ with open('$tmpfile', 'w') as f:
 }
 
 cmd_mcp_status() {
-  local target="claude"
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --claude) target="claude"; shift ;;
-      --codex) target="codex"; shift ;;
-      *) die "Unknown option: $1. Usage: ai-inst mcp status [--claude|--codex]" ;;
-    esac
-  done
-
-  [[ "$target" == "claude" || "$target" == "codex" ]] || die "Unsupported target: $target. Use --claude or --codex."
+  mcp_parse_opts "$@" || die "Unknown option. Usage: ai-inst mcp status [--claude|--codex]"
+  local target="$MCP_TARGET"
 
   if [[ "$target" == "claude" ]]; then
     local mcp_file=".mcp.json"
@@ -854,16 +1431,36 @@ Modules:
   rm <name>             Delete module
   push [-m "msg"]       Commit & push rules repo
 
+Skills:
+  skill list                     List skills (* = active in project)
+  skill new <name>               Create skill
+  skill edit <name>              Edit skill
+  skill show <name>              Show skill content
+  skill rm <name>                Delete skill
+
 Project:
   project init                    Create .ai-modules + instructions.local.md
   project add <mod...>            Add modules to project
   project rm <mod...>             Remove modules from project
+  project add-skill <skill...>    Add skills to project
+  project rm-skill <skill...>     Remove skills from project
   project edit                    Edit local instructions
   project status                  Show project status
   project targets <file...>       Set target files
 
 Build:
-  build [--target <file>]         Build instruction files
+  build [--target <file>] [--no-migrate]   Build instruction files
+
+Migrations:
+  Migrations auto-update .ai-modules when modules are renamed, split,
+  or extracted into skills. They are YAML files in the rules repo
+  (migrations/*.yml) with when/then rules. Applied automatically on build.
+
+  migrate                          Apply pending migrations to .ai-modules
+  migrate --status                 List all migrations and their applied/pending state
+  migrate --create <slug>          Create a new migration (template or with --rule/--description)
+    [--description "..."]           Migration description
+    [--rule "when_key:val->act:val,act:val"]  Add rule (repeatable)
 
 Hooks:
   hook install                    Install git hooks for auto-build
@@ -892,8 +1489,10 @@ main() {
     show)    cmd_show "$@" ;;
     rm)      cmd_rm "$@" ;;
     push)    cmd_push "$@" ;;
+    skill)   cmd_skill "$@" ;;
     project) cmd_project "$@" ;;
     build)   cmd_build "$@" ;;
+    migrate) cmd_migrate "$@" ;;
     hook)    cmd_hook "$@" ;;
     mcp)     cmd_mcp "$@" ;;
     help|--help|-h) cmd_help ;;

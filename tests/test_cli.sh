@@ -562,6 +562,496 @@ test_mcp_status_codex() {
   assert_contains "$output" "Project: installed" "project installed after add"
 }
 
+# ─── skill helpers ────────────────────────────────────────────────────────────
+
+create_skill() {
+  local name="$1"
+  local description="${2:-Test skill}"
+  local content="${3:-Skill instructions for $name}"
+  mkdir -p "$AI_INST_DIR/skills/$name"
+  cat > "$AI_INST_DIR/skills/$name/SKILL.md" << EOF
+---
+name: $name
+description: $description
+---
+
+$content
+EOF
+  cd "$AI_INST_DIR" && git add -A && git commit -m "add skill $name" >/dev/null 2>&1 && cd - >/dev/null
+}
+
+# ─── skill tests ──────────────────────────────────────────────────────────────
+
+test_skill_new() {
+  init_repo
+  "$AI_INST" skill new myskill 2>&1
+  assert_dir_exists "$AI_INST_DIR/skills/myskill" "skill dir created"
+  assert_file_exists "$AI_INST_DIR/skills/myskill/SKILL.md" "SKILL.md created"
+  local content
+  content="$(cat "$AI_INST_DIR/skills/myskill/SKILL.md")"
+  assert_contains "$content" "name: myskill" "name in frontmatter"
+  # verify committed
+  local status
+  status="$(cd "$AI_INST_DIR" && git status --porcelain)"
+  assert_eq "" "$status" "clean after skill new"
+}
+
+test_skill_new_duplicate() {
+  init_repo
+  "$AI_INST" skill new myskill 2>&1
+  assert_exit_code 1 "$AI_INST" skill new myskill
+}
+
+test_skill_show() {
+  init_repo
+  create_skill "myskill" "Test skill" "Do something useful"
+  local output
+  output="$("$AI_INST" skill show myskill)"
+  assert_contains "$output" "Do something useful" "skill content shown"
+}
+
+test_skill_show_missing() {
+  init_repo
+  assert_exit_code 1 "$AI_INST" skill show nonexistent
+}
+
+test_skill_rm() {
+  init_repo
+  create_skill "myskill"
+  "$AI_INST" skill rm myskill 2>&1
+  if [[ -d "$AI_INST_DIR/skills/myskill" ]]; then
+    echo "    FAIL: skill directory still exists"
+    return 1
+  fi
+}
+
+test_skill_list() {
+  init_repo
+  create_skill "alpha" "First skill"
+  create_skill "beta" "Second skill"
+  local output
+  output="$("$AI_INST" skill list)"
+  assert_contains "$output" "alpha" "alpha in list"
+  assert_contains "$output" "beta" "beta in list"
+}
+
+test_skill_list_with_project_markers() {
+  init_repo
+  create_skill "active-skill"
+  create_skill "inactive-skill"
+  init_project
+  "$AI_INST" project add-skill active-skill 2>&1
+  local output
+  output="$("$AI_INST" skill list)"
+  assert_contains "$output" "* active-skill" "active marker"
+  assert_contains "$output" "  inactive-skill" "inactive no marker"
+}
+
+# ─── project skill tests ──────────────────────────────────────────────────────
+
+test_project_add_skill() {
+  init_repo
+  create_skill "deploy" "Deploy skill"
+  init_project
+  "$AI_INST" project add-skill deploy 2>&1
+  local content
+  content="$(cat "$PROJECT_DIR/.ai-modules")"
+  assert_contains "$content" "[skills]" "skills section created"
+  assert_contains "$content" "deploy" "skill added"
+}
+
+test_project_add_skill_creates_section() {
+  init_repo
+  create_skill "refactor" "Refactor skill"
+  init_project
+  # Ensure no [skills] section yet
+  local content
+  content="$(cat "$PROJECT_DIR/.ai-modules")"
+  assert_not_contains "$content" "[skills]" "no skills section initially"
+  "$AI_INST" project add-skill refactor 2>&1
+  content="$(cat "$PROJECT_DIR/.ai-modules")"
+  assert_contains "$content" "[skills]" "skills section created"
+  assert_contains "$content" "refactor" "skill added"
+}
+
+test_project_add_skill_duplicate() {
+  init_repo
+  create_skill "deploy"
+  init_project
+  "$AI_INST" project add-skill deploy 2>&1
+  local output
+  output="$("$AI_INST" project add-skill deploy 2>&1)"
+  assert_contains "$output" "already in project" "duplicate message"
+}
+
+test_project_rm_skill() {
+  init_repo
+  create_skill "deploy"
+  init_project
+  "$AI_INST" project add-skill deploy 2>&1
+  "$AI_INST" project rm-skill deploy 2>&1
+  local content
+  content="$(cat "$PROJECT_DIR/.ai-modules")"
+  assert_not_contains "$content" "deploy" "skill removed"
+}
+
+# ─── build with skills tests ──────────────────────────────────────────────────
+
+test_build_copies_skills_to_claude_dir() {
+  init_repo
+  create_skill "deploy" "Deploy the app"
+  init_project
+  "$AI_INST" project add-skill deploy 2>&1
+  "$AI_INST" build 2>&1
+  assert_dir_exists "$PROJECT_DIR/.claude/skills/deploy" "skill in .claude/skills"
+  assert_file_exists "$PROJECT_DIR/.claude/skills/deploy/SKILL.md" "SKILL.md in .claude/skills"
+}
+
+test_build_copies_skills_to_agents_dir() {
+  init_repo
+  create_skill "deploy" "Deploy the app"
+  init_project
+  "$AI_INST" project add-skill deploy 2>&1
+  "$AI_INST" build 2>&1
+  assert_dir_exists "$PROJECT_DIR/.agents/skills/deploy" "skill in .agents/skills"
+  assert_file_exists "$PROJECT_DIR/.agents/skills/deploy/SKILL.md" "SKILL.md in .agents/skills"
+}
+
+test_build_skill_directory_structure() {
+  init_repo
+  create_skill "deploy" "Deploy the app"
+  # Add a subdirectory with resources
+  mkdir -p "$AI_INST_DIR/skills/deploy/scripts"
+  echo "#!/bin/bash" > "$AI_INST_DIR/skills/deploy/scripts/deploy.sh"
+  cd "$AI_INST_DIR" && git add -A && git commit -m "add deploy script" >/dev/null 2>&1 && cd - >/dev/null
+  init_project
+  "$AI_INST" project add-skill deploy 2>&1
+  "$AI_INST" build 2>&1
+  assert_file_exists "$PROJECT_DIR/.claude/skills/deploy/scripts/deploy.sh" "script copied"
+  assert_file_exists "$PROJECT_DIR/.agents/skills/deploy/scripts/deploy.sh" "script in agents dir"
+}
+
+test_build_skills_index_in_target() {
+  init_repo
+  create_skill "deploy" "Deploy the application to production"
+  create_skill "refactor" "Refactor code following best practices"
+  init_project
+  "$AI_INST" project add-skill deploy 2>&1
+  "$AI_INST" project add-skill refactor 2>&1
+  "$AI_INST" build 2>&1
+  local content
+  content="$(cat "$PROJECT_DIR/CLAUDE.md")"
+  assert_contains "$content" "## Available skills" "skills index header"
+  assert_contains "$content" "deploy" "deploy in index"
+  assert_contains "$content" "Deploy the application to production" "deploy description"
+  assert_contains "$content" "refactor" "refactor in index"
+}
+
+test_build_cleans_old_skills() {
+  init_repo
+  create_skill "old-skill" "Old skill"
+  create_skill "new-skill" "New skill"
+  init_project
+  "$AI_INST" project add-skill old-skill 2>&1
+  "$AI_INST" build 2>&1
+  assert_dir_exists "$PROJECT_DIR/.claude/skills/old-skill" "old skill built"
+  # Replace skill in project
+  "$AI_INST" project rm-skill old-skill 2>&1
+  "$AI_INST" project add-skill new-skill 2>&1
+  "$AI_INST" build 2>&1
+  assert_dir_exists "$PROJECT_DIR/.claude/skills/new-skill" "new skill present"
+  if [[ -d "$PROJECT_DIR/.claude/skills/old-skill" ]]; then
+    echo "    FAIL: old skill should have been cleaned up"
+    return 1
+  fi
+}
+
+test_build_updates_gitignore_for_skills() {
+  init_repo
+  create_skill "deploy" "Deploy skill"
+  init_project
+  "$AI_INST" project add-skill deploy 2>&1
+  "$AI_INST" build 2>&1
+  local content
+  content="$(cat "$PROJECT_DIR/.gitignore")"
+  assert_contains "$content" ".claude/skills/" ".claude/skills/ in gitignore"
+  assert_contains "$content" ".agents/skills/" ".agents/skills/ in gitignore"
+}
+
+test_build_missing_skill_warning() {
+  init_repo
+  init_project
+  # Manually add nonexistent skill to .ai-modules
+  printf '\n[skills]\nnonexistent-skill\n' >> "$PROJECT_DIR/.ai-modules"
+  local output
+  output="$("$AI_INST" build 2>&1)"
+  assert_contains "$output" "warning" "missing skill warning"
+}
+
+# ─── migration helpers ────────────────────────────────────────────────────────
+
+create_migration() {
+  local id="$1"
+  local filename="$2"
+  local content="$3"
+  mkdir -p "$AI_INST_DIR/migrations"
+  echo "$content" > "$AI_INST_DIR/migrations/$filename"
+  cd "$AI_INST_DIR" && git add -A && git commit -m "add migration $id" >/dev/null 2>&1 && cd - >/dev/null
+}
+
+# ─── migration tests ─────────────────────────────────────────────────────────
+
+test_migrate_add_skill_when_has_module() {
+  init_repo
+  create_module "typescript" "# TypeScript rules"
+  create_skill "jsdoc" "JSDoc generation"
+  init_project
+  "$AI_INST" project add typescript 2>&1
+  create_migration "2026-01-01-jsdoc" "2026-01-01-jsdoc.yml" 'id: "2026-01-01-jsdoc"
+description: "Extract JSDoc into skill"
+rules:
+  - when:
+      has_module: typescript
+    then:
+      add_skill: jsdoc'
+
+  "$AI_INST" migrate 2>&1
+  local content
+  content="$(cat "$PROJECT_DIR/.ai-modules")"
+  assert_contains "$content" "jsdoc" "jsdoc skill added"
+  assert_contains "$content" "[skills]" "skills section created"
+}
+
+test_migrate_remove_and_add_module() {
+  init_repo
+  create_module "old-name" "# Old module"
+  create_module "new-name" "# New module"
+  init_project
+  "$AI_INST" project add old-name 2>&1
+  create_migration "2026-01-02-rename" "2026-01-02-rename.yml" 'id: "2026-01-02-rename"
+description: "Rename old-name to new-name"
+rules:
+  - when:
+      has_module: old-name
+    then:
+      remove_module: old-name
+      add_module: new-name'
+
+  "$AI_INST" migrate 2>&1
+  local content
+  content="$(cat "$PROJECT_DIR/.ai-modules")"
+  assert_not_contains "$content" "old-name" "old module removed"
+  assert_contains "$content" "new-name" "new module added"
+}
+
+test_migrate_condition_not_met() {
+  init_repo
+  create_module "python" "# Python rules"
+  create_skill "jsdoc" "JSDoc generation"
+  init_project
+  "$AI_INST" project add python 2>&1
+  create_migration "2026-01-03-jsdoc" "2026-01-03-jsdoc.yml" 'id: "2026-01-03-jsdoc"
+description: "Extract JSDoc into skill"
+rules:
+  - when:
+      has_module: typescript
+    then:
+      add_skill: jsdoc'
+
+  "$AI_INST" migrate 2>&1
+  local content
+  content="$(cat "$PROJECT_DIR/.ai-modules")"
+  assert_not_contains "$content" "jsdoc" "jsdoc not added (no typescript)"
+}
+
+test_migrate_idempotent() {
+  init_repo
+  create_module "typescript" "# TypeScript rules"
+  create_skill "jsdoc" "JSDoc generation"
+  init_project
+  "$AI_INST" project add typescript 2>&1
+  create_migration "2026-01-04-idem" "2026-01-04-idem.yml" 'id: "2026-01-04-idem"
+description: "Test idempotency"
+rules:
+  - when:
+      has_module: typescript
+    then:
+      add_skill: jsdoc'
+
+  "$AI_INST" migrate 2>&1
+  "$AI_INST" migrate 2>&1
+  # Should not duplicate
+  local count
+  count="$(grep -c "jsdoc" "$PROJECT_DIR/.ai-modules" || true)"
+  assert_eq "1" "$count" "jsdoc appears once"
+}
+
+test_migrate_state_file() {
+  init_repo
+  create_module "typescript" "# TypeScript rules"
+  create_skill "jsdoc" "JSDoc generation"
+  init_project
+  "$AI_INST" project add typescript 2>&1
+  create_migration "2026-01-05-state" "2026-01-05-state.yml" 'id: "2026-01-05-state"
+description: "Test state tracking"
+rules:
+  - when:
+      has_module: typescript
+    then:
+      add_skill: jsdoc'
+
+  "$AI_INST" migrate 2>&1
+  assert_file_exists "$PROJECT_DIR/.ai-migrations-state" "state file created"
+  local content
+  content="$(cat "$PROJECT_DIR/.ai-migrations-state")"
+  assert_contains "$content" "2026-01-05-state" "migration id tracked"
+}
+
+test_migrate_status() {
+  init_repo
+  create_module "typescript" "# TypeScript rules"
+  create_skill "jsdoc" "JSDoc generation"
+  init_project
+  "$AI_INST" project add typescript 2>&1
+  create_migration "2026-01-06-status" "2026-01-06-status.yml" 'id: "2026-01-06-status"
+description: "Test status display"
+rules:
+  - when:
+      has_module: typescript
+    then:
+      add_skill: jsdoc'
+
+  local output
+  output="$("$AI_INST" migrate --status 2>&1)"
+  assert_contains "$output" "2026-01-06-status" "migration id shown"
+  assert_contains "$output" "1 pending" "pending count"
+
+  "$AI_INST" migrate 2>&1
+  output="$("$AI_INST" migrate --status 2>&1)"
+  assert_contains "$output" "0 pending" "no pending after apply"
+}
+
+test_migrate_order() {
+  init_repo
+  create_module "base" "# Base module"
+  create_module "extra" "# Extra module"
+  create_skill "s1" "Skill one"
+  create_skill "s2" "Skill two"
+  init_project
+  "$AI_INST" project add base 2>&1
+
+  create_migration "2026-01-01-first" "2026-01-01-first.yml" 'id: "2026-01-01-first"
+description: "First migration"
+rules:
+  - when:
+      has_module: base
+    then:
+      add_module: extra'
+
+  create_migration "2026-01-02-second" "2026-01-02-second.yml" 'id: "2026-01-02-second"
+description: "Second migration depends on first"
+rules:
+  - when:
+      has_module: extra
+    then:
+      add_skill: s1'
+
+  "$AI_INST" migrate 2>&1
+  local content
+  content="$(cat "$PROJECT_DIR/.ai-modules")"
+  assert_contains "$content" "extra" "first migration applied"
+  assert_contains "$content" "s1" "second migration applied (chained)"
+}
+
+test_migrate_no_migrations_dir() {
+  init_repo
+  init_project
+  # Should not error
+  "$AI_INST" migrate 2>&1
+}
+
+test_build_runs_migrations() {
+  init_repo
+  create_module "typescript" "# TypeScript rules"
+  create_skill "jsdoc" "JSDoc generation"
+  init_project
+  "$AI_INST" project add typescript 2>&1
+  create_migration "2026-01-07-build" "2026-01-07-build.yml" 'id: "2026-01-07-build"
+description: "Auto-migrate on build"
+rules:
+  - when:
+      has_module: typescript
+    then:
+      add_skill: jsdoc'
+
+  "$AI_INST" build 2>&1
+  local content
+  content="$(cat "$PROJECT_DIR/.ai-modules")"
+  assert_contains "$content" "jsdoc" "migration applied during build"
+}
+
+test_build_no_migrate_flag() {
+  init_repo
+  create_module "typescript" "# TypeScript rules"
+  create_skill "jsdoc" "JSDoc generation"
+  init_project
+  "$AI_INST" project add typescript 2>&1
+  create_migration "2026-01-08-skip" "2026-01-08-skip.yml" 'id: "2026-01-08-skip"
+description: "Should be skipped"
+rules:
+  - when:
+      has_module: typescript
+    then:
+      add_skill: jsdoc'
+
+  "$AI_INST" build --no-migrate 2>&1
+  local content
+  content="$(cat "$PROJECT_DIR/.ai-modules")"
+  assert_not_contains "$content" "jsdoc" "migration skipped with --no-migrate"
+}
+
+test_migrate_gitignore() {
+  init_repo
+  create_module "typescript" "# TypeScript rules"
+  create_skill "jsdoc" "JSDoc generation"
+  init_project
+  "$AI_INST" project add typescript 2>&1
+  create_migration "2026-01-09-gi" "2026-01-09-gi.yml" 'id: "2026-01-09-gi"
+description: "Gitignore test"
+rules:
+  - when:
+      has_module: typescript
+    then:
+      add_skill: jsdoc'
+
+  "$AI_INST" migrate 2>&1
+  local content
+  content="$(cat "$PROJECT_DIR/.gitignore")"
+  assert_contains "$content" ".ai-migrations-state" "state file in gitignore"
+}
+
+test_migrate_not_has_skill_condition() {
+  init_repo
+  create_module "typescript" "# TypeScript rules"
+  create_skill "jsdoc" "JSDoc generation"
+  init_project
+  "$AI_INST" project add typescript 2>&1
+  "$AI_INST" project add-skill jsdoc 2>&1
+  create_migration "2026-01-10-nothas" "2026-01-10-nothas.yml" 'id: "2026-01-10-nothas"
+description: "Only add if not already present"
+rules:
+  - when:
+      not_has_skill: jsdoc
+    then:
+      add_skill: jsdoc'
+
+  "$AI_INST" migrate 2>&1
+  # jsdoc was already there, condition not met — should still be there once
+  local count
+  count="$(grep -c "jsdoc" "$PROJECT_DIR/.ai-modules" || true)"
+  assert_eq "1" "$count" "jsdoc not duplicated"
+}
+
 # ─── edge case tests ─────────────────────────────────────────────────────────
 
 test_no_repo_error() {
@@ -648,6 +1138,48 @@ run_test test_mcp_install_codex_global
 run_test test_mcp_remove_codex_local
 run_test test_mcp_remove_codex_global
 run_test test_mcp_status_codex
+
+echo ""
+echo "skills:"
+run_test test_skill_new
+run_test test_skill_new_duplicate
+run_test test_skill_show
+run_test test_skill_show_missing
+run_test test_skill_rm
+run_test test_skill_list
+run_test test_skill_list_with_project_markers
+
+echo ""
+echo "project skills:"
+run_test test_project_add_skill
+run_test test_project_add_skill_creates_section
+run_test test_project_add_skill_duplicate
+run_test test_project_rm_skill
+
+echo ""
+echo "build with skills:"
+run_test test_build_copies_skills_to_claude_dir
+run_test test_build_copies_skills_to_agents_dir
+run_test test_build_skill_directory_structure
+run_test test_build_skills_index_in_target
+run_test test_build_cleans_old_skills
+run_test test_build_updates_gitignore_for_skills
+run_test test_build_missing_skill_warning
+
+echo ""
+echo "migrations:"
+run_test test_migrate_add_skill_when_has_module
+run_test test_migrate_remove_and_add_module
+run_test test_migrate_condition_not_met
+run_test test_migrate_idempotent
+run_test test_migrate_state_file
+run_test test_migrate_status
+run_test test_migrate_order
+run_test test_migrate_no_migrations_dir
+run_test test_build_runs_migrations
+run_test test_build_no_migrate_flag
+run_test test_migrate_gitignore
+run_test test_migrate_not_has_skill_condition
 
 echo ""
 echo "edge cases:"
