@@ -6,6 +6,7 @@ AI_INST_DIR="${AI_INST_DIR:-$HOME/.ai-instructions}"
 MODULES_DIR="$AI_INST_DIR/modules"
 SKILLS_DIR="$AI_INST_DIR/skills"
 MIGRATIONS_DIR="$AI_INST_DIR/migrations"
+RECOMMENDED_FILE="$AI_INST_DIR/recommended"
 AI_MODULES_FILE=".ai-modules"
 AI_MIGRATIONS_STATE=".ai-migrations-state"
 LOCAL_INSTRUCTIONS="instructions.local.md"
@@ -423,6 +424,64 @@ cmd_push() {
   info "Pushed to remote"
 }
 
+# ─── Recommend commands ───────────────────────────────────────────────────────
+
+cmd_recommend_list() {
+  ensure_repo
+  if [[ ! -f "$RECOMMENDED_FILE" ]]; then
+    info "No recommended modules configured"
+    return
+  fi
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    echo "$line"
+  done < "$RECOMMENDED_FILE"
+}
+
+cmd_recommend_add() {
+  ensure_repo
+  [[ $# -eq 0 ]] && die "Usage: ai-inst recommend add <module...>"
+  for name in "$@"; do
+    module_exists "$name" || die "Module '$name' not found in rules repo"
+    if [[ -f "$RECOMMENDED_FILE" ]] && grep -qxF "$name" "$RECOMMENDED_FILE" 2>/dev/null; then
+      info "Module '$name' already recommended"
+    else
+      echo "$name" >> "$RECOMMENDED_FILE"
+      info "Added '$name' to recommended"
+    fi
+  done
+  git_commit_repo "recommend: add $*"
+}
+
+cmd_recommend_rm() {
+  ensure_repo
+  [[ $# -eq 0 ]] && die "Usage: ai-inst recommend rm <module...>"
+  [[ -f "$RECOMMENDED_FILE" ]] || die "No recommended file found"
+  for name in "$@"; do
+    if grep -qxF "$name" "$RECOMMENDED_FILE" 2>/dev/null; then
+      local tmpfile
+      tmpfile="$(mktemp)"
+      grep -vxF "$name" "$RECOMMENDED_FILE" > "$tmpfile"
+      mv "$tmpfile" "$RECOMMENDED_FILE"
+      info "Removed '$name' from recommended"
+    else
+      info "Module '$name' is not in recommended"
+    fi
+  done
+  git_commit_repo "recommend: remove $*"
+}
+
+cmd_recommend() {
+  local subcmd="${1:-}"
+  shift || true
+  case "$subcmd" in
+    list) cmd_recommend_list "$@" ;;
+    add)  cmd_recommend_add "$@" ;;
+    rm)   cmd_recommend_rm "$@" ;;
+    *)    die "Usage: ai-inst recommend {list|add|rm}" ;;
+  esac
+}
+
 # ─── Project commands ─────────────────────────────────────────────────────────
 
 cmd_project_init() {
@@ -450,6 +509,43 @@ EOF
 
   gitignore_ensure CLAUDE.md .cursorrules AGENTS.md
   info "Updated .gitignore"
+
+  # Show recommended modules check if available
+  if [[ -f "$RECOMMENDED_FILE" ]]; then
+    echo ""
+    cmd_project_doctor
+  fi
+}
+
+cmd_project_doctor() {
+  ensure_project
+  [[ -f "$RECOMMENDED_FILE" ]] || { info "No recommended modules configured"; return 0; }
+
+  load_project_config
+  local missing=()
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    local found=false
+    for m in "${MODULES_ARR[@]+"${MODULES_ARR[@]}"}"; do
+      [[ "$m" == "$line" ]] && { found=true; break; }
+    done
+    if [[ "$found" == false ]]; then
+      missing+=("$line")
+    fi
+  done < "$RECOMMENDED_FILE"
+
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    info "All recommended modules are present"
+    return 0
+  fi
+
+  echo "Missing recommended modules:"
+  for m in "${missing[@]}"; do
+    echo "  ⚠ $m"
+  done
+  echo ""
+  echo "Add with: ai-inst project add ${missing[*]}"
+  return 1
 }
 
 cmd_project_add() {
@@ -629,7 +725,8 @@ cmd_project() {
     targets)   cmd_project_targets "$@" ;;
     add-skill) cmd_project_add_skill "$@" ;;
     rm-skill)  cmd_project_rm_skill "$@" ;;
-    *)         die "Usage: ai-inst project {init|add|rm|edit|status|targets|add-skill|rm-skill}" ;;
+    doctor)    cmd_project_doctor "$@" ;;
+    *)         die "Usage: ai-inst project {init|add|rm|edit|status|targets|add-skill|rm-skill|doctor}" ;;
   esac
 }
 
@@ -1438,6 +1535,11 @@ Skills:
   skill show <name>              Show skill content
   skill rm <name>                Delete skill
 
+Recommend:
+  recommend list                 List recommended modules
+  recommend add <mod...>         Mark modules as recommended
+  recommend rm <mod...>          Unmark modules as recommended
+
 Project:
   project init                    Create .ai-modules + instructions.local.md
   project add <mod...>            Add modules to project
@@ -1447,6 +1549,7 @@ Project:
   project edit                    Edit local instructions
   project status                  Show project status
   project targets <file...>       Set target files
+  project doctor                  Check for missing recommended modules
 
 Build:
   build [--target <file>] [--no-migrate]   Build instruction files
@@ -1489,8 +1592,9 @@ main() {
     show)    cmd_show "$@" ;;
     rm)      cmd_rm "$@" ;;
     push)    cmd_push "$@" ;;
-    skill)   cmd_skill "$@" ;;
-    project) cmd_project "$@" ;;
+    skill)     cmd_skill "$@" ;;
+    recommend) cmd_recommend "$@" ;;
+    project)   cmd_project "$@" ;;
     build)   cmd_build "$@" ;;
     migrate) cmd_migrate "$@" ;;
     hook)    cmd_hook "$@" ;;

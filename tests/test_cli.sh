@@ -1052,6 +1052,147 @@ rules:
   assert_eq "1" "$count" "jsdoc not duplicated"
 }
 
+# ─── recommend tests ─────────────────────────────────────────────────────────
+
+test_recommend_list_empty() {
+  init_repo
+  local out
+  out="$("$AI_INST" recommend list 2>&1)"
+  assert_contains "$out" "No recommended modules configured"
+}
+
+test_recommend_add() {
+  init_repo
+  create_module "workflow"
+  create_module "testing"
+  "$AI_INST" recommend add workflow testing >/dev/null 2>&1
+  local out
+  out="$("$AI_INST" recommend list 2>&1)"
+  assert_contains "$out" "workflow"
+  assert_contains "$out" "testing"
+}
+
+test_recommend_add_duplicate() {
+  init_repo
+  create_module "workflow"
+  "$AI_INST" recommend add workflow >/dev/null 2>&1
+  local out
+  out="$("$AI_INST" recommend add workflow 2>&1)"
+  assert_contains "$out" "already recommended"
+  # should not duplicate
+  local count
+  count="$(grep -c "workflow" "$AI_INST_DIR/recommended" || true)"
+  assert_eq "1" "$count" "workflow not duplicated"
+}
+
+test_recommend_add_nonexistent_module() {
+  init_repo
+  assert_exit_code 1 "$AI_INST" recommend add nonexistent
+}
+
+test_recommend_rm() {
+  init_repo
+  create_module "workflow"
+  create_module "testing"
+  "$AI_INST" recommend add workflow testing >/dev/null 2>&1
+  "$AI_INST" recommend rm workflow >/dev/null 2>&1
+  local out
+  out="$("$AI_INST" recommend list 2>&1)"
+  assert_not_contains "$out" "workflow"
+  assert_contains "$out" "testing"
+}
+
+test_recommend_rm_not_in_list() {
+  init_repo
+  create_module "workflow"
+  "$AI_INST" recommend add workflow >/dev/null 2>&1
+  local out
+  out="$("$AI_INST" recommend rm testing 2>&1)"
+  assert_contains "$out" "not in recommended"
+}
+
+test_recommend_commits_to_repo() {
+  init_repo
+  create_module "workflow"
+  "$AI_INST" recommend add workflow >/dev/null 2>&1
+  local log
+  log="$(cd "$AI_INST_DIR" && git log --oneline -1)"
+  assert_contains "$log" "recommend"
+}
+
+# ─── project doctor tests ────────────────────────────────────────────────────
+
+test_doctor_no_recommended_file() {
+  init_repo
+  init_project
+  local out
+  out="$("$AI_INST" project doctor 2>&1)"
+  assert_contains "$out" "No recommended modules configured"
+}
+
+test_doctor_all_present() {
+  init_repo
+  create_module "workflow"
+  init_project
+  "$AI_INST" project add workflow >/dev/null 2>&1
+  "$AI_INST" recommend add workflow >/dev/null 2>&1
+  local out
+  out="$("$AI_INST" project doctor 2>&1)"
+  assert_contains "$out" "All recommended modules are present"
+}
+
+test_doctor_missing_modules() {
+  init_repo
+  create_module "workflow"
+  create_module "testing"
+  init_project
+  "$AI_INST" project add workflow >/dev/null 2>&1
+  "$AI_INST" recommend add workflow testing >/dev/null 2>&1
+  local out
+  out="$("$AI_INST" project doctor 2>&1)" || true
+  assert_contains "$out" "testing"
+  assert_contains "$out" "Missing recommended modules"
+}
+
+test_doctor_exit_code() {
+  init_repo
+  create_module "workflow"
+  create_module "testing"
+  init_project
+  "$AI_INST" project add workflow >/dev/null 2>&1
+  "$AI_INST" recommend add workflow testing >/dev/null 2>&1
+  # missing testing → exit 1
+  assert_exit_code 1 "$AI_INST" project doctor
+  # add testing → exit 0
+  "$AI_INST" project add testing >/dev/null 2>&1
+  assert_exit_code 0 "$AI_INST" project doctor
+}
+
+test_doctor_skips_comments_and_blanks() {
+  init_repo
+  create_module "workflow"
+  init_project
+  "$AI_INST" project add workflow >/dev/null 2>&1
+  # Manually write recommended file with comments and blanks
+  printf "# This is a comment\n\nworkflow\n\n" > "$AI_INST_DIR/recommended"
+  cd "$AI_INST_DIR" && git add -A && git commit -m "test" >/dev/null 2>&1 && cd "$PROJECT_DIR"
+  local out
+  out="$("$AI_INST" project doctor 2>&1)"
+  assert_contains "$out" "All recommended modules are present"
+}
+
+test_project_init_shows_doctor() {
+  init_repo
+  create_module "workflow"
+  create_module "testing"
+  "$AI_INST" recommend add workflow testing >/dev/null 2>&1
+  local out
+  out="$("$AI_INST" project init 2>&1)" || true
+  assert_contains "$out" "Missing recommended modules"
+  assert_contains "$out" "testing"
+  assert_contains "$out" "workflow"
+}
+
 # ─── edge case tests ─────────────────────────────────────────────────────────
 
 test_no_repo_error() {
@@ -1180,6 +1321,25 @@ run_test test_build_runs_migrations
 run_test test_build_no_migrate_flag
 run_test test_migrate_gitignore
 run_test test_migrate_not_has_skill_condition
+
+echo ""
+echo "recommend:"
+run_test test_recommend_list_empty
+run_test test_recommend_add
+run_test test_recommend_add_duplicate
+run_test test_recommend_add_nonexistent_module
+run_test test_recommend_rm
+run_test test_recommend_rm_not_in_list
+run_test test_recommend_commits_to_repo
+
+echo ""
+echo "project doctor:"
+run_test test_doctor_no_recommended_file
+run_test test_doctor_all_present
+run_test test_doctor_missing_modules
+run_test test_doctor_exit_code
+run_test test_doctor_skips_comments_and_blanks
+run_test test_project_init_shows_doctor
 
 echo ""
 echo "edge cases:"

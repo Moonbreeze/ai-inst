@@ -260,6 +260,50 @@ server.tool(
   }
 );
 
+// ─── Recommend tools ──────────────────────────────────────────────────────────
+
+server.tool("recommend_list", "List recommended modules", {}, async () => {
+  const output = run("ai-inst recommend list");
+  return { content: [{ type: "text", text: output || "No recommended modules configured." }] };
+});
+
+server.tool(
+  "recommend_add",
+  "Mark modules as recommended (suggested for all projects)",
+  { modules: z.array(z.string()).describe("Module names to recommend") },
+  async ({ modules }) => {
+    const output = run(`ai-inst recommend add ${modules.join(" ")}`);
+    return { content: [{ type: "text", text: output }] };
+  }
+);
+
+server.tool(
+  "recommend_rm",
+  "Remove modules from recommended list",
+  { modules: z.array(z.string()).describe("Module names to remove from recommended") },
+  async ({ modules }) => {
+    const output = run(`ai-inst recommend rm ${modules.join(" ")}`);
+    return { content: [{ type: "text", text: output }] };
+  }
+);
+
+server.tool(
+  "project_doctor",
+  "Check a project for missing recommended modules",
+  { project_path: z.string().describe("Absolute path to the project directory") },
+  async ({ project_path }) => {
+    try {
+      const output = run("ai-inst project doctor", project_path);
+      return { content: [{ type: "text", text: output }] };
+    } catch (e: unknown) {
+      // doctor exits 1 when missing modules found — this is expected output, not an error
+      const err = e as { stdout?: Buffer | string; message?: string };
+      const stdout = err.stdout ? String(err.stdout).trim() : "";
+      return { content: [{ type: "text", text: stdout || err.message || "Check failed" }] };
+    }
+  }
+);
+
 server.tool("sync", "Sync rules repository (pull + push)", {}, async () => {
   const output = run("ai-inst repo sync");
   return { content: [{ type: "text", text: output }] };
