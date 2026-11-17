@@ -141,6 +141,7 @@ test_repo_init() {
   init_repo
   assert_dir_exists "$AI_INST_DIR/.git" "git init"
   assert_dir_exists "$AI_INST_DIR/modules" "modules dir"
+  assert_dir_exists "$AI_INST_DIR/agents" "agents dir"
   assert_file_exists "$AI_INST_DIR/README.md" "README"
   assert_file_exists "$AI_INST_DIR/bootstrap.sh" "bootstrap"
 }
@@ -580,6 +581,24 @@ EOF
   cd "$AI_INST_DIR" && git add -A && git commit -m "add skill $name" >/dev/null 2>&1 && cd - >/dev/null
 }
 
+create_agent() {
+  local name="$1"
+  local content
+  if [[ $# -ge 2 ]]; then
+    content="$2"
+  else
+    content="---
+description: Test agent
+mode: subagent
+---
+
+Agent instructions for $name"
+  fi
+  mkdir -p "$AI_INST_DIR/agents"
+  printf '%s\n' "$content" > "$AI_INST_DIR/agents/$name.md"
+  cd "$AI_INST_DIR" && git add -A && git commit -m "add agent $name" >/dev/null 2>&1 && cd - >/dev/null
+}
+
 # ─── skill tests ──────────────────────────────────────────────────────────────
 
 test_skill_new() {
@@ -786,6 +805,110 @@ test_build_missing_skill_warning() {
   local output
   output="$("$AI_INST" build 2>&1)"
   assert_contains "$output" "warning" "missing skill warning"
+}
+
+# ─── OpenCode agent tests ─────────────────────────────────────────────────────
+
+test_agent_crud_and_list() {
+  init_repo
+  "$AI_INST" agent new reviewer 2>&1
+  assert_file_exists "$AI_INST_DIR/agents/reviewer.md" "agent file created"
+  local content output
+  content="$("$AI_INST" agent show reviewer)"
+  assert_contains "$content" "description:" "agent description frontmatter"
+  assert_contains "$content" "mode: subagent" "agent mode frontmatter"
+
+  output="$("$AI_INST" agent list)"
+  assert_contains "$output" "reviewer" "agent listed"
+
+  cat > "$TMPDIR_BASE/editor" << 'EOF'
+#!/usr/bin/env bash
+echo "edited by test" >> "$1"
+EOF
+  chmod +x "$TMPDIR_BASE/editor"
+  EDITOR="$TMPDIR_BASE/editor" "$AI_INST" agent edit reviewer 2>&1
+  content="$("$AI_INST" agent show reviewer)"
+  assert_contains "$content" "edited by test" "agent edited"
+
+  "$AI_INST" agent rm reviewer 2>&1
+  assert_file_not_exists "$AI_INST_DIR/agents/reviewer.md" "agent removed"
+}
+
+test_project_agent_selection() {
+  init_repo
+  create_agent "reviewer"
+  init_project
+  "$AI_INST" project add-agent reviewer 2>&1
+  local output content count
+  output="$("$AI_INST" project add-agent reviewer 2>&1)"
+  assert_contains "$output" "already in project" "duplicate agent message"
+  count="$(grep -c '^reviewer$' "$PROJECT_DIR/.ai-modules")"
+  assert_eq "1" "$count" "agent not duplicated"
+  output="$("$AI_INST" agent list)"
+  assert_contains "$output" "* reviewer" "selected agent list marker"
+  output="$("$AI_INST" project status 2>&1)"
+  assert_contains "$output" "Agents (OpenCode):" "agents status section"
+  assert_contains "$output" "+ reviewer" "selected agent status"
+  assert_exit_code 1 "$AI_INST" project add-agent missing
+  "$AI_INST" project rm-agent reviewer 2>&1
+  content="$(cat "$PROJECT_DIR/.ai-modules")"
+  assert_not_contains "$content" "reviewer" "agent removed from project"
+}
+
+test_agent_sections_are_separate_and_preserved() {
+  init_repo
+  create_module "shared"
+  create_skill "shared"
+  create_agent "shared"
+  init_project
+  "$AI_INST" project add-agent shared 2>&1
+  "$AI_INST" project add-skill shared 2>&1
+  "$AI_INST" project add shared 2>&1
+
+  local output count
+  output="$("$AI_INST" project status 2>&1)"
+  count="$(printf '%s\n' "$output" | grep -c '^  + shared$')"
+  assert_eq "3" "$count" "same name parsed in all three sections"
+
+  "$AI_INST" project rm-agent shared 2>&1
+  output="$("$AI_INST" project status 2>&1)"
+  count="$(printf '%s\n' "$output" | grep -c '^  + shared$')"
+  assert_eq "2" "$count" "removing agent preserves module and skill"
+}
+
+test_build_copies_and_cleans_opencode_agents() {
+  init_repo
+  create_agent "reviewer" $'---\ndescription: Reviews code\nmode: subagent\n---\n\nExact agent body'
+  init_project
+  "$AI_INST" project add-agent reviewer 2>&1
+  "$AI_INST" build 2>&1
+  assert_file_exists "$PROJECT_DIR/.opencode/agents/reviewer.md" "OpenCode agent copied"
+  assert_eq "$(cat "$AI_INST_DIR/agents/reviewer.md")" "$(cat "$PROJECT_DIR/.opencode/agents/reviewer.md")" "agent copied unchanged"
+
+  echo stale > "$PROJECT_DIR/.opencode/agents/stale.md"
+  "$AI_INST" project rm-agent reviewer 2>&1
+  "$AI_INST" build 2>&1
+  assert_file_not_exists "$PROJECT_DIR/.opencode/agents/stale.md" "stale agent output cleaned"
+}
+
+test_build_missing_agent_warning_and_gitignore() {
+  init_repo
+  init_project
+  printf '\n[agents]\nmissing-agent\n' >> "$PROJECT_DIR/.ai-modules"
+  local output content
+  output="$("$AI_INST" build 2>&1)"
+  assert_contains "$output" "warning: agent 'missing-agent' not found" "missing agent warning"
+  content="$(cat "$PROJECT_DIR/.gitignore")"
+  assert_contains "$content" ".opencode/agents/" "OpenCode agents in gitignore"
+}
+
+test_build_without_agents_updates_gitignore() {
+  init_repo
+  init_project
+  "$AI_INST" build 2>&1
+  local content
+  content="$(cat "$PROJECT_DIR/.gitignore")"
+  assert_contains "$content" ".opencode/agents/" "OpenCode agents in gitignore without selected agents"
 }
 
 # ─── migration helpers ────────────────────────────────────────────────────────
@@ -1306,6 +1429,15 @@ run_test test_build_skills_index_in_target
 run_test test_build_cleans_old_skills
 run_test test_build_updates_gitignore_for_skills
 run_test test_build_missing_skill_warning
+
+echo ""
+echo "OpenCode agents:"
+run_test test_agent_crud_and_list
+run_test test_project_agent_selection
+run_test test_agent_sections_are_separate_and_preserved
+run_test test_build_copies_and_cleans_opencode_agents
+run_test test_build_missing_agent_warning_and_gitignore
+run_test test_build_without_agents_updates_gitignore
 
 echo ""
 echo "migrations:"

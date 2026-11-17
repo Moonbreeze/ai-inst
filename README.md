@@ -29,9 +29,11 @@ ai-inst build
 Two repositories:
 
 1. **Tool repo** (`ai-inst`) — this repo, the CLI + MCP server
-2. **Rules repo** (`~/.ai-instructions`) — your personal modules and skills, synced via git
+2. **Rules repo** (`~/.ai-instructions`) — your personal modules, skills, and OpenCode agents, synced via git
 
 **Modules** are always injected into the agent context at build time. **Skills** ([Agent Skills](https://agentskills.io) standard) are loaded on demand — the agent sees a description index and fetches full instructions only when needed, keeping the context lean.
+
+**Agents** in this release are OpenCode V2 subagents. Canonical Markdown files live in the rules repo under `agents/` and selected agents are copied to `.opencode/agents/`; this agent support does not target Claude Code or Codex.
 
 ## Commands
 
@@ -62,6 +64,15 @@ Two repositories:
 | `ai-inst skill show <name>` | Show skill content |
 | `ai-inst skill rm <name>` | Delete skill |
 
+### Agents (OpenCode)
+| Command | Description |
+|---------|-------------|
+| `ai-inst agent list` | List agents (`*` = active in project) |
+| `ai-inst agent new <name>` | Create an OpenCode V2 subagent |
+| `ai-inst agent edit <name>` | Edit agent |
+| `ai-inst agent show <name>` | Show agent content |
+| `ai-inst agent rm <name>` | Delete agent |
+
 ### Project
 | Command | Description |
 |---------|-------------|
@@ -70,6 +81,8 @@ Two repositories:
 | `ai-inst project rm <mod...>` | Remove modules |
 | `ai-inst project add-skill <skill...>` | Add skills |
 | `ai-inst project rm-skill <skill...>` | Remove skills |
+| `ai-inst project add-agent <agent...>` | Add OpenCode subagents |
+| `ai-inst project rm-agent <agent...>` | Remove OpenCode subagents |
 | `ai-inst project edit` | Edit local instructions |
 | `ai-inst project status` | Show status |
 | `ai-inst project targets <file...>` | Set target files |
@@ -109,9 +122,16 @@ framework-fastapi
 deploy
 refactor
 db-migrate
+
+# OpenCode V2 subagents
+[agents]
+reviewer
+debugger
 ```
 
 Skills follow the [Agent Skills](https://agentskills.io) standard and are deployed to `.claude/skills/` and `.agents/skills/` during `ai-inst build`, covering Claude Code, Codex, Cursor, Roo Code, and Windsurf.
+
+Selected agents are copied unchanged from `agents/<name>.md` in the rules repo to `.opencode/agents/<name>.md` during each build. The old `.opencode/agents/` output is cleaned first, and `.opencode/agents/` is added to the project `.gitignore`. This output is OpenCode-only; no `.claude/agents` or Codex agent format is generated.
 
 ## MCP Server
 

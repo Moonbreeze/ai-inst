@@ -5,6 +5,7 @@ VERSION="0.1.0"
 AI_INST_DIR="${AI_INST_DIR:-$HOME/.ai-instructions}"
 MODULES_DIR="$AI_INST_DIR/modules"
 SKILLS_DIR="$AI_INST_DIR/skills"
+AGENTS_DIR="$AI_INST_DIR/agents"
 MIGRATIONS_DIR="$AI_INST_DIR/migrations"
 RECOMMENDED_FILE="$AI_INST_DIR/recommended"
 AI_MODULES_FILE=".ai-modules"
@@ -33,31 +34,42 @@ skill_path() { echo "$SKILLS_DIR/$1"; }
 
 skill_exists() { [[ -d "$SKILLS_DIR/$1" && -f "$SKILLS_DIR/$1/SKILL.md" ]]; }
 
+agent_path() { echo "$AGENTS_DIR/$1.md"; }
+
+agent_exists() { [[ -f "$(agent_path "$1")" ]]; }
+
 skill_description() {
   local skill_md="$SKILLS_DIR/$1/SKILL.md"
   [[ -f "$skill_md" ]] || return
   sed -n '/^---$/,/^---$/{ /^description:/{ s/^description: *//; s/^ *"//; s/" *$//; p; q; } }' "$skill_md"
 }
 
-# Parse .ai-modules → targets, module list, and skills list
+# Parse .ai-modules → targets, module list, skills list, and agents list
 parse_ai_modules() {
   local targets=()
   local modules=()
   local skills=()
-  local in_skills=0
+  local agents=()
+  local section=""
   while IFS= read -r line; do
     line="${line%%#*}"
     line="$(echo "$line" | xargs)" # trim
     [[ -z "$line" ]] && continue
     if [[ "$line" == "[skills]" ]]; then
-      in_skills=1
+      section="skills"
+      continue
+    fi
+    if [[ "$line" == "[agents]" ]]; then
+      section="agents"
       continue
     fi
     if [[ "$line" == targets:* ]]; then
       read -ra targets <<< "${line#targets:}"
-    elif [[ "$in_skills" -eq 1 ]]; then
+    elif [[ "$section" == "skills" ]]; then
       skills+=("$line")
-    else
+    elif [[ "$section" == "agents" ]]; then
+      agents+=("$line")
+    elif [[ -z "$section" ]]; then
       modules+=("$line")
     fi
   done < "$AI_MODULES_FILE"
@@ -65,6 +77,7 @@ parse_ai_modules() {
   echo "TARGETS='${targets[*]}'"
   echo "MODULES='${modules[*]}'"
   echo "SKILLS='${skills[*]}'"
+  echo "AGENTS='${agents[*]}'"
 }
 
 git_commit_repo() {
@@ -86,18 +99,21 @@ gitignore_ensure() {
   done
 }
 
-# Parse .ai-modules and populate TARGETS_ARR, MODULES_ARR, SKILLS_ARR
+# Parse .ai-modules and populate TARGETS_ARR, MODULES_ARR, SKILLS_ARR, AGENTS_ARR
 load_project_config() {
   eval "$(parse_ai_modules)"
   TARGETS_ARR=()
   MODULES_ARR=()
   SKILLS_ARR=()
+  AGENTS_ARR=()
   # shellcheck disable=SC2086
   [[ -n "${TARGETS:-}" ]] && read -ra TARGETS_ARR <<< "$TARGETS" || true
   # shellcheck disable=SC2086
   [[ -n "${MODULES:-}" ]] && read -ra MODULES_ARR <<< "$MODULES" || true
   # shellcheck disable=SC2086
   [[ -n "${SKILLS:-}" ]] && read -ra SKILLS_ARR <<< "$SKILLS" || true
+  # shellcheck disable=SC2086
+  [[ -n "${AGENTS:-}" ]] && read -ra AGENTS_ARR <<< "$AGENTS" || true
 }
 
 # ─── repo commands ────────────────────────────────────────────────────────────
@@ -118,6 +134,7 @@ cmd_repo_init() {
 
   mkdir -p "$MODULES_DIR"
   mkdir -p "$SKILLS_DIR"
+  mkdir -p "$AGENTS_DIR"
   mkdir -p "$MIGRATIONS_DIR"
   cd "$AI_INST_DIR"
   git init
@@ -403,6 +420,104 @@ cmd_skill() {
   esac
 }
 
+# ─── Agent commands ───────────────────────────────────────────────────────────
+
+cmd_agent_new() {
+  ensure_repo
+  local name="${1:-}"
+  [[ -z "$name" ]] && die "Usage: ai-inst agent new <name>"
+  agent_exists "$name" && die "Agent '$name' already exists"
+
+  local path
+  mkdir -p "$AGENTS_DIR"
+  path="$(agent_path "$name")"
+  cat > "$path" << EOF
+---
+description: Describe when to use this agent.
+mode: subagent
+---
+
+# $name
+
+<!-- Add agent instructions here -->
+EOF
+
+  if [[ -n "${EDITOR:-}" ]]; then
+    "$EDITOR" "$path"
+  fi
+  git_commit_repo "add agent: $name"
+  info "Agent '$name' created"
+}
+
+cmd_agent_list() {
+  ensure_repo
+  local project_agents=()
+  if [[ -f "$AI_MODULES_FILE" ]]; then
+    load_project_config
+    project_agents=("${AGENTS_ARR[@]+"${AGENTS_ARR[@]}"}")
+  fi
+
+  for f in "$AGENTS_DIR"/*.md; do
+    [[ -f "$f" ]] || continue
+    local name
+    name="$(basename "$f" .md)"
+    local marker=" "
+    for pa in "${project_agents[@]+"${project_agents[@]}"}"; do
+      if [[ "$pa" == "$name" ]]; then
+        marker="*"
+        break
+      fi
+    done
+    echo " $marker $name"
+  done
+}
+
+cmd_agent_show() {
+  ensure_repo
+  local name="${1:-}"
+  [[ -z "$name" ]] && die "Usage: ai-inst agent show <name>"
+  agent_exists "$name" || die "Agent '$name' not found"
+  cat "$(agent_path "$name")"
+}
+
+cmd_agent_edit() {
+  ensure_repo
+  local name="${1:-}"
+  [[ -z "$name" ]] && die "Usage: ai-inst agent edit <name>"
+  agent_exists "$name" || die "Agent '$name' not found"
+
+  if [[ -n "${EDITOR:-}" ]]; then
+    "$EDITOR" "$(agent_path "$name")"
+  else
+    die "No \$EDITOR set"
+  fi
+  git_commit_repo "edit agent: $name"
+  info "Agent '$name' updated"
+}
+
+cmd_agent_rm() {
+  ensure_repo
+  local name="${1:-}"
+  [[ -z "$name" ]] && die "Usage: ai-inst agent rm <name>"
+  agent_exists "$name" || die "Agent '$name' not found"
+  rm "$(agent_path "$name")"
+  git_commit_repo "remove agent: $name"
+  info "Agent '$name' removed"
+}
+
+cmd_agent() {
+  local subcmd="${1:-}"
+  shift || true
+  case "$subcmd" in
+    new)   cmd_agent_new "$@" ;;
+    list)  cmd_agent_list "$@" ;;
+    show)  cmd_agent_show "$@" ;;
+    edit)  cmd_agent_edit "$@" ;;
+    rm)    cmd_agent_rm "$@" ;;
+    *)     die "Usage: ai-inst agent {new|list|show|edit|rm}" ;;
+  esac
+}
+
 # ─── Push ──────────────────────────────────────────────────────────────────
 
 cmd_push() {
@@ -484,6 +599,44 @@ cmd_recommend() {
 
 # ─── Project commands ─────────────────────────────────────────────────────────
 
+config_add_module() {
+  local name="$1" tmpfile
+  tmpfile="$(mktemp)"
+  awk -v name="$name" 'BEGIN {added=0} /^\[/ && !added {print name; added=1} {print} END {if (!added) print name}' "$AI_MODULES_FILE" > "$tmpfile"
+  mv "$tmpfile" "$AI_MODULES_FILE"
+}
+
+config_add_to_section() {
+  local section="$1" name="$2" tmpfile
+  if grep -qxF "[$section]" "$AI_MODULES_FILE" 2>/dev/null; then
+    tmpfile="$(mktemp)"
+    awk -v header="[$section]" -v name="$name" '
+      BEGIN {in_section=0; added=0}
+      /^\[/ {
+        if (in_section && !added) {print name; added=1}
+        in_section=($0 == header)
+      }
+      {print}
+      END {if (in_section && !added) print name}
+    ' "$AI_MODULES_FILE" > "$tmpfile"
+    mv "$tmpfile" "$AI_MODULES_FILE"
+  else
+    printf '\n[%s]\n%s\n' "$section" "$name" >> "$AI_MODULES_FILE"
+  fi
+}
+
+config_remove_entry() {
+  local section="$1" name="$2" tmpfile
+  tmpfile="$(mktemp)"
+  awk -v header="${section:+[$section]}" -v name="$name" '
+    BEGIN {in_section=(header == "")}
+    /^\[/ {in_section=($0 == header)}
+    in_section && $0 == name {next}
+    {print}
+  ' "$AI_MODULES_FILE" > "$tmpfile"
+  mv "$tmpfile" "$AI_MODULES_FILE"
+}
+
 cmd_project_init() {
   if [[ ! -f "$AI_MODULES_FILE" ]]; then
     cat > "$AI_MODULES_FILE" << 'EOF'
@@ -553,12 +706,18 @@ cmd_project_add() {
   ensure_repo
   [[ $# -eq 0 ]] && die "Usage: ai-inst project add <module...>"
 
+  load_project_config
   for name in "$@"; do
     module_exists "$name" || die "Module '$name' not found in rules repo"
-    if grep -qxF "$name" "$AI_MODULES_FILE" 2>/dev/null; then
+    local already=0
+    for m in "${MODULES_ARR[@]+"${MODULES_ARR[@]}"}"; do
+      [[ "$m" == "$name" ]] && already=1 && break
+    done
+    if [[ $already -eq 1 ]]; then
       info "Module '$name' already in project"
     else
-      echo "$name" >> "$AI_MODULES_FILE"
+      config_add_module "$name"
+      MODULES_ARR+=("$name")
       info "Added '$name'"
     fi
   done
@@ -569,11 +728,13 @@ cmd_project_rm() {
   [[ $# -eq 0 ]] && die "Usage: ai-inst project rm <module...>"
 
   for name in "$@"; do
-    if grep -qxF "$name" "$AI_MODULES_FILE" 2>/dev/null; then
-      local tmpfile
-      tmpfile="$(mktemp)"
-      grep -vxF "$name" "$AI_MODULES_FILE" > "$tmpfile"
-      mv "$tmpfile" "$AI_MODULES_FILE"
+    load_project_config
+    local found=0
+    for m in "${MODULES_ARR[@]+"${MODULES_ARR[@]}"}"; do
+      [[ "$m" == "$name" ]] && found=1 && break
+    done
+    if [[ $found -eq 1 ]]; then
+      config_remove_entry "" "$name"
       info "Removed '$name'"
     else
       info "Module '$name' not in project"
@@ -599,11 +760,7 @@ cmd_project_add_skill() {
     if [[ $already -eq 1 ]]; then
       info "Skill '$name' already in project"
     else
-      if grep -q '^\[skills\]' "$AI_MODULES_FILE" 2>/dev/null; then
-        echo "$name" >> "$AI_MODULES_FILE"
-      else
-        printf '\n[skills]\n%s\n' "$name" >> "$AI_MODULES_FILE"
-      fi
+      config_add_to_section "skills" "$name"
       info "Added skill '$name'"
     fi
   done
@@ -622,13 +779,53 @@ cmd_project_rm_skill() {
     done
 
     if [[ $found -eq 1 ]]; then
-      local tmpfile
-      tmpfile="$(mktemp)"
-      grep -vxF "$name" "$AI_MODULES_FILE" > "$tmpfile"
-      mv "$tmpfile" "$AI_MODULES_FILE"
+      config_remove_entry "skills" "$name"
       info "Removed skill '$name'"
     else
       info "Skill '$name' not in project"
+    fi
+  done
+}
+
+cmd_project_add_agent() {
+  ensure_project
+  ensure_repo
+  [[ $# -eq 0 ]] && die "Usage: ai-inst project add-agent <agent...>"
+
+  for name in "$@"; do
+    agent_exists "$name" || die "Agent '$name' not found in rules repo"
+    load_project_config
+
+    local already=0
+    for a in "${AGENTS_ARR[@]+"${AGENTS_ARR[@]}"}"; do
+      [[ "$a" == "$name" ]] && already=1 && break
+    done
+
+    if [[ $already -eq 1 ]]; then
+      info "Agent '$name' already in project"
+    else
+      config_add_to_section "agents" "$name"
+      info "Added agent '$name'"
+    fi
+  done
+}
+
+cmd_project_rm_agent() {
+  ensure_project
+  [[ $# -eq 0 ]] && die "Usage: ai-inst project rm-agent <agent...>"
+
+  for name in "$@"; do
+    load_project_config
+    local found=0
+    for a in "${AGENTS_ARR[@]+"${AGENTS_ARR[@]}"}"; do
+      [[ "$a" == "$name" ]] && found=1 && break
+    done
+
+    if [[ $found -eq 1 ]]; then
+      config_remove_entry "agents" "$name"
+      info "Removed agent '$name'"
+    else
+      info "Agent '$name' not in project"
     fi
   done
 }
@@ -671,6 +868,19 @@ cmd_project_status() {
         echo "  + $s"
       else
         echo "  ! $s (not found)"
+      fi
+    done
+  fi
+
+  if [[ ${#AGENTS_ARR[@]} -gt 0 ]]; then
+    echo ""
+    echo "Agents (OpenCode):"
+    for a in "${AGENTS_ARR[@]}"; do
+      [[ -z "$a" ]] && continue
+      if agent_exists "$a"; then
+        echo "  + $a"
+      else
+        echo "  ! $a (not found)"
       fi
     done
   fi
@@ -725,8 +935,10 @@ cmd_project() {
     targets)   cmd_project_targets "$@" ;;
     add-skill) cmd_project_add_skill "$@" ;;
     rm-skill)  cmd_project_rm_skill "$@" ;;
+    add-agent) cmd_project_add_agent "$@" ;;
+    rm-agent)  cmd_project_rm_agent "$@" ;;
     doctor)    cmd_project_doctor "$@" ;;
-    *)         die "Usage: ai-inst project {init|add|rm|edit|status|targets|add-skill|rm-skill|doctor}" ;;
+    *)         die "Usage: ai-inst project {init|add|rm|edit|status|targets|add-skill|rm-skill|add-agent|rm-agent|doctor}" ;;
   esac
 }
 
@@ -867,24 +1079,17 @@ migration_apply_action() {
         [[ "$m" == "$val" ]] && found=1 && break
       done
       if [[ $found -eq 0 ]]; then
-        # Add before [skills] section if it exists, otherwise append
-        if grep -q '^\[skills\]' "$AI_MODULES_FILE" 2>/dev/null; then
-          local tmpfile
-          tmpfile="$(mktemp)"
-          sed "/^\[skills\]/i $val" "$AI_MODULES_FILE" > "$tmpfile"
-          mv "$tmpfile" "$AI_MODULES_FILE"
-        else
-          echo "$val" >> "$AI_MODULES_FILE"
-        fi
+        config_add_module "$val"
         info "  + add module: $val"
       fi
       ;;
     remove_module)
-      if grep -qxF "$val" "$AI_MODULES_FILE" 2>/dev/null; then
-        local tmpfile
-        tmpfile="$(mktemp)"
-        grep -vxF "$val" "$AI_MODULES_FILE" > "$tmpfile"
-        mv "$tmpfile" "$AI_MODULES_FILE"
+      local found=0
+      for m in "${MODULES_ARR[@]+"${MODULES_ARR[@]}"}"; do
+        [[ "$m" == "$val" ]] && found=1 && break
+      done
+      if [[ $found -eq 1 ]]; then
+        config_remove_entry "" "$val"
         info "  - remove module: $val"
       fi
       ;;
@@ -896,20 +1101,17 @@ migration_apply_action() {
         [[ "$s" == "$val" ]] && found=1 && break
       done
       if [[ $found -eq 0 ]]; then
-        if grep -q '^\[skills\]' "$AI_MODULES_FILE" 2>/dev/null; then
-          echo "$val" >> "$AI_MODULES_FILE"
-        else
-          printf '\n[skills]\n%s\n' "$val" >> "$AI_MODULES_FILE"
-        fi
+        config_add_to_section "skills" "$val"
         info "  + add skill: $val"
       fi
       ;;
     remove_skill)
-      if grep -qxF "$val" "$AI_MODULES_FILE" 2>/dev/null; then
-        local tmpfile
-        tmpfile="$(mktemp)"
-        grep -vxF "$val" "$AI_MODULES_FILE" > "$tmpfile"
-        mv "$tmpfile" "$AI_MODULES_FILE"
+      local found=0
+      for s in "${SKILLS_ARR[@]+"${SKILLS_ARR[@]}"}"; do
+        [[ "$s" == "$val" ]] && found=1 && break
+      done
+      if [[ $found -eq 1 ]]; then
+        config_remove_entry "skills" "$val"
         info "  - remove skill: $val"
       fi
       ;;
@@ -1177,6 +1379,24 @@ cmd_build() {
 
     gitignore_ensure ".claude/skills/" ".agents/skills/"
   fi
+
+  # OpenCode subagents are generated from the selected canonical agent files.
+  rm -rf ".opencode/agents"
+  if [[ ${#AGENTS_ARR[@]} -gt 0 ]]; then
+    local copied_agents=0
+    for a in "${AGENTS_ARR[@]}"; do
+      [[ -z "$a" ]] && continue
+      if agent_exists "$a"; then
+        mkdir -p ".opencode/agents"
+        cp "$(agent_path "$a")" ".opencode/agents/$a.md"
+        copied_agents=$((copied_agents + 1))
+      else
+        echo "warning: agent '$a' not found, skipping" >&2
+      fi
+    done
+    [[ $copied_agents -gt 0 ]] && info "Copied $copied_agents agent(s) to .opencode/agents/"
+  fi
+  gitignore_ensure ".opencode/agents/"
 }
 
 # ─── Hooks ────────────────────────────────────────────────────────────────────
@@ -1535,6 +1755,13 @@ Skills:
   skill show <name>              Show skill content
   skill rm <name>                Delete skill
 
+Agents (OpenCode subagents):
+  agent list                     List agents (* = active in project)
+  agent new <name>               Create agent
+  agent edit <name>              Edit agent
+  agent show <name>              Show agent content
+  agent rm <name>                Delete agent
+
 Recommend:
   recommend list                 List recommended modules
   recommend add <mod...>         Mark modules as recommended
@@ -1546,6 +1773,8 @@ Project:
   project rm <mod...>             Remove modules from project
   project add-skill <skill...>    Add skills to project
   project rm-skill <skill...>     Remove skills from project
+  project add-agent <agent...>    Add OpenCode subagents to project
+  project rm-agent <agent...>     Remove OpenCode subagents from project
   project edit                    Edit local instructions
   project status                  Show project status
   project targets <file...>       Set target files
@@ -1593,6 +1822,7 @@ main() {
     rm)      cmd_rm "$@" ;;
     push)    cmd_push "$@" ;;
     skill)     cmd_skill "$@" ;;
+    agent)     cmd_agent "$@" ;;
     recommend) cmd_recommend "$@" ;;
     project)   cmd_project "$@" ;;
     build)   cmd_build "$@" ;;
